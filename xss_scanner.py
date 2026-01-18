@@ -24,6 +24,13 @@ try:
     from bs4 import BeautifulSoup
     from colorama import init, Fore, Style, Back
     init(autoreset=True)
+    # Suppress XML parsing warnings from BeautifulSoup
+    import warnings
+    try:
+        from bs4 import XMLParsedAsHTMLWarning
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    except ImportError:
+        pass  # Older versions of bs4 don't have this warning
 except ImportError as e:
     print(f"[!] Missing dependency: {e}")
     print("[*] Install with: pip3 install requests beautifulsoup4 colorama")
@@ -1569,17 +1576,17 @@ class XSSScanner:
         # =================================================================
         # AUDIO/VIDEO ADVANCED
         # =================================================================
-        '<video onloadeddata=alert(1) autoplay><source>',
-        '<video oncanplay=alert(1) autoplay><source>',
-        '<video onplaying=alert(1) autoplay><source>',
-        '<audio onloadstart=alert(1)><source>',
-        '<audio onsuspend=alert(1)><source>',
+        # '<video onloadeddata=alert(1) autoplay><source>',
+        # '<video oncanplay=alert(1) autoplay><source>',
+        # '<video onplaying=alert(1) autoplay><source>',
+        # '<audio onloadstart=alert(1)><source>',
+        # '<audio onsuspend=alert(1)><source>',
         
         # =================================================================
         # PICTURE ELEMENT BYPASSES
         # =================================================================
-        '<picture><source srcset=x onerror=alert(1)><img>',
-        '<picture><img src=x onerror=alert(1)>',
+        # '<picture><source srcset=x onerror=alert(1)><img>',
+        # '<picture><img src=x onerror=alert(1)>',
         
         # =================================================================
         # FORM ADVANCED BYPASSES
@@ -1830,6 +1837,9 @@ class XSSScanner:
             if response.status_code in [403, 406, 429, 503]:
                 score += 1
             
+                if self.verbose:
+                    print(f"{Fore.BLUE}[~] Checking {waf_name}: Score {score} (Initial){Style.RESET_ALL}")
+
             if score >= 2:
                 detected_wafs.append(waf_name)
                 self.waf_info[waf_name] = {
@@ -1839,8 +1849,9 @@ class XSSScanner:
                 }
                 
                 if self.verbose:
-                    # Supressed verbose output for WAF signatures as per user request
-                    pass
+                    print(f"{Fore.GREEN}[+] WAF match: {waf_name} (Score: {score}){Style.RESET_ALL}")
+            elif score > 0 and self.verbose:
+                 print(f"{Fore.YELLOW}[?] Partial WAF match: {waf_name} (Score: {score} - Insufficient){Style.RESET_ALL}")
         
         return detected_wafs
     
@@ -2046,24 +2057,24 @@ class XSSScanner:
         
         primary_waf = waf_names.get(detected_wafs[0], detected_wafs[0].upper())
         
-        print(f"\n{Fore.RED}╔{'═'*68}╗{Style.RESET_ALL}")
-        print(f"{Fore.RED}║{' '*20}🛡️  WAF DETECTED 🛡️{' '*26}║{Style.RESET_ALL}")
-        print(f"{Fore.RED}╠{'═'*68}╣{Style.RESET_ALL}")
-        print(f"{Fore.RED}║ {Fore.WHITE}Primary WAF:    {Fore.YELLOW}{primary_waf:<51}║{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.RED}|{' '*20}🛡️  WAF DETECTED 🛡️{' '*26}|{Style.RESET_ALL}")
+        print(f"{Fore.RED}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.RED}| {Fore.WHITE}Primary WAF:    {Fore.YELLOW}{primary_waf:<51}|{Style.RESET_ALL}")
         
         if len(detected_wafs) > 1:
             others = ', '.join([waf_names.get(w, w) for w in detected_wafs[1:]])
             if len(others) > 48:
                 others = others[:45] + '...'
-            print(f"{Fore.RED}║ {Fore.WHITE}Also detected:  {Fore.CYAN}{others:<51}║{Style.RESET_ALL}")
+            print(f"{Fore.RED}| {Fore.WHITE}Also detected:  {Fore.CYAN}{others:<51}|{Style.RESET_ALL}")
         
         if self.waf_bypass:
-            print(f"{Fore.RED}║ {Fore.WHITE}Status:         {Fore.GREEN}{'WAF BYPASS MODE ENABLED':<51}║{Style.RESET_ALL}")
-            print(f"{Fore.RED}║ {Fore.WHITE}Bypass Payloads:{Fore.YELLOW}{len(self.WAF_BYPASS_PAYLOADS):<52}║{Style.RESET_ALL}")
+            print(f"{Fore.RED}| {Fore.WHITE}Status:         {Fore.GREEN}{'WAF BYPASS MODE ENABLED':<51}|{Style.RESET_ALL}")
+            print(f"{Fore.RED}| {Fore.WHITE}Bypass Payloads:{Fore.YELLOW}{len(self.WAF_BYPASS_PAYLOADS):<52}|{Style.RESET_ALL}")
         else:
-            print(f"{Fore.RED}║ {Fore.WHITE}Status:         {Fore.YELLOW}{'Use --waf-bypass to enable bypass payloads':<51}║{Style.RESET_ALL}")
+            print(f"{Fore.RED}| {Fore.WHITE}Status:         {Fore.YELLOW}{'Use --waf-bypass to enable bypass payloads':<51}|{Style.RESET_ALL}")
         
-        print(f"{Fore.RED}╚{'═'*68}╝{Style.RESET_ALL}")
+        print(f"{Fore.RED}+{'-'*68}+{Style.RESET_ALL}")
         
     def _normalize_url(self, url):
         """Normalize the target URL"""
@@ -2089,27 +2100,27 @@ class XSSScanner:
             f"{Fore.MAGENTA}S{Fore.CYAN}u{Fore.GREEN}b{Fore.YELLOW}h{Fore.RED}a{Fore.MAGENTA}j{Fore.CYAN}i{Fore.GREEN}t"
         )
         
-        banner = f"""
-{Fore.CYAN}{Style.BRIGHT}╔══════════════════════════════════════════════════════════════════╗
-║{Fore.GREEN}  ≋{Fore.YELLOW}★                                                          {Fore.GREEN}★≋  {Fore.CYAN}║
-║   {Fore.RED}██╗  ██╗███████╗███████╗    {Fore.GREEN}███████╗ ██████╗ █████╗ ███╗   ██╗{Fore.GREEN}➤{Fore.CYAN}║
-║   {Fore.RED}╚██╗██╔╝██╔════╝██╔════╝    {Fore.GREEN}██╔════╝██╔════╝██╔══██╗████╗  ██║{Fore.CYAN} ║
-║    {Fore.RED}╚███╔╝ ███████╗███████╗    {Fore.GREEN}███████╗██║     ███████║██╔██╗ ██║{Fore.GREEN}➤{Fore.CYAN}║
-║    {Fore.RED}██╔██╗ ╚════██║╚════██║    {Fore.GREEN}╚════██║██║     ██╔══██║██║╚██╗██║{Fore.CYAN} ║
-║   {Fore.RED}██╔╝ ██╗███████║███████║    {Fore.GREEN}███████║╚██████╗██║  ██║██║ ╚████║{Fore.GREEN}➤{Fore.CYAN}║
-║   {Fore.RED}╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.GREEN}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝{Fore.CYAN} ║
-║                                                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║   {Fore.YELLOW}⚡ {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux{Fore.CYAN}                ║
-║   {Fore.YELLOW}⚡ {Fore.WHITE}Automatic Parameter Discovery & Payload Testing{Fore.CYAN}             ║
-║   {Fore.YELLOW}⚡ {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities{Fore.CYAN}            ║
-╠══════════════════════════════════════════════════════════════════╣
-║                                                                  ║
-║      {Fore.YELLOW}🔥 {Fore.WHITE}Crafted by: {rainbow_name} {Fore.WHITE}⚔️  {Fore.MAGENTA}Cyber Security Enthusiast{Fore.CYAN}       ║
-║                                                                  ║
-║           {Fore.YELLOW}⚠️  {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} ⚠️{Fore.CYAN}            ║
-║{Fore.GREEN}  ≋{Fore.YELLOW}★                                                          {Fore.GREEN}★≋  {Fore.CYAN}║
-╚══════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        banner = rf"""
+{Fore.CYAN}{Style.BRIGHT}╔{'═'*69}╗
+║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
+║{Fore.GREEN}   ██╗  ██╗███████╗███████╗    {Fore.WHITE}███████╗ ██████╗ █████╗ ███╗   ██╗    {Fore.CYAN}║
+║{Fore.GREEN}   ╚██╗██╔╝██╔════╝██╔════╝    {Fore.WHITE}██╔════╝██╔════╝██╔══██╗████╗  ██║    {Fore.CYAN}║
+║{Fore.GREEN}    ╚███╔╝ ███████╗███████╗    {Fore.WHITE}███████╗██║     ███████║██╔██╗ ██║    {Fore.CYAN}║
+║{Fore.GREEN}    ██╔██╗ ╚════██║╚════██║    {Fore.WHITE}╚════██║██║     ██╔══██║██║╚██╗██║    {Fore.CYAN}║
+║{Fore.GREEN}   ██╔╝ ██╗███████║███████║    {Fore.WHITE}███████║╚██████╗██║  ██║██║ ╚████║    {Fore.CYAN}║
+║{Fore.GREEN}   ╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.WHITE}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝    {Fore.CYAN}║
+║                                                                     ║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux                  {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Automatic Parameter Discovery & Payload Testing               {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities              {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Enhanced Auto-Crawl for PHP MVC Endpoints                     {Fore.CYAN}║
+║                                                                     ║
+║      {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}> {Fore.WHITE}Code by {Fore.WHITE}Subhajit {Fore.WHITE}- {Fore.GREEN}Security Research {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}>{Fore.CYAN}                   ║
+║                                                                     ║
+║           {Fore.YELLOW}[!] {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} [!]{Fore.CYAN}              ║
+║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
+╚{'═'*69}╝{Style.RESET_ALL}
+{Fore.GREEN}[+] Version: 1.1 (WAF Fix Applied){Style.RESET_ALL}
 """
         print(banner)
     
@@ -3070,9 +3081,9 @@ class XSSScanner:
             print(f"{Fore.GREEN}[+] Total test combinations: {total_params_found} parameters{Style.RESET_ALL}")
         
         if total_params_found == 0:
-            print(f"\n{Fore.YELLOW}╔{'═'*68}╗{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}║{' '*20}⚠️  NO PARAMETERS FOUND{' '*24}║{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}╚{'═'*68}╝{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}|{' '*20}⚠️  NO PARAMETERS FOUND{' '*24}|{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}+{'-'*68}+{Style.RESET_ALL}")
             print(f"\n{Fore.CYAN}💡 Tip: Use --force-test to test common XSS parameters anyway{Style.RESET_ALL}")
             return
         
@@ -3081,13 +3092,27 @@ class XSSScanner:
         total_params = sum(len(p['get']) + len(p['post']) for p in self.found_params.values())
         total_tests = total_params * len(payloads)
         
-        print(f"\n{Fore.CYAN}╔{'═'*68}╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║{' '*18}🔍 XSS VULNERABILITY TESTING{' '*20}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╠{'═'*68}╣{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Payloads:    {Fore.YELLOW}{len(payloads):>6} {Fore.CYAN}({payload_source}){' '*38}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Parameters:  {Fore.YELLOW}{total_params:>6}{' '*48}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Total Tests: {Fore.YELLOW}{total_tests:>6}{' '*48}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚{'═'*68}╝{Style.RESET_ALL}\n")
+        # Check if WAF bypass mode is active (only when user explicitly requested it)
+        is_waf_bypass = self.waf_bypass
+        bypass_count = len(self.WAF_BYPASS_PAYLOADS) if is_waf_bypass else 0
+        
+        print(f"\n{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|{' '*18}🔍 XSS VULNERABILITY TESTING{' '*20}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Payloads:    {Fore.YELLOW}{len(payloads):>6} {Fore.CYAN}({payload_source}){' '*38}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Parameters:  {Fore.YELLOW}{total_params:>6}{' '*48}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Total Tests: {Fore.YELLOW}{total_tests:>6}{' '*48}|{Style.RESET_ALL}")
+        
+        # Show WAF bypass mode info if active
+        if is_waf_bypass:
+            waf_name = self.waf_detected if hasattr(self, 'waf_detected') and self.waf_detected else "Manual"
+            waf_name_display = waf_name.upper() if isinstance(waf_name, str) else "DETECTED"
+            print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}| {Fore.MAGENTA}⚔️  WAF BYPASS MODE ACTIVE{' '*40}|{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}| {Fore.WHITE}Bypass Payloads: {Fore.YELLOW}{bypass_count:>3} {Fore.MAGENTA}(targeting: {waf_name_display[:20]}){' '*20}|{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}| {Fore.WHITE}Use {Fore.YELLOW}-v{Fore.WHITE} flag to see each bypass payload being tested{' '*11}|{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}\n")
         
         tested_params = 0
         vuln_found_count = len(self.vulnerabilities)
@@ -3186,6 +3211,7 @@ class XSSScanner:
     def _test_param(self, url, param, method):
         """Test a parameter with all XSS payloads"""
         from urllib.parse import quote
+        import threading
         
         # Skip if we already found a vuln for this param (first_only mode)
         param_key = f"{url}|{param}|{method}"
@@ -3193,9 +3219,26 @@ class XSSScanner:
             return True  # Already found vuln
         
         payloads = self.get_payloads()
-        for payload in payloads:
+        total_payloads = len(payloads)
+        
+        # Check if we're using WAF bypass payloads (only when user explicitly requested it)
+        is_waf_bypass = self.waf_bypass
+        bypass_payload_count = len(self.WAF_BYPASS_PAYLOADS)
+        
+        for idx, payload in enumerate(payloads, 1):
             try:
                 encoded_payload = quote(payload, safe='')
+                
+                # Display bypass payload being tested when WAF bypass mode is active
+                if is_waf_bypass and self.verbose:
+                    # Check if this is a bypass payload (first N payloads are bypass payloads)
+                    if idx <= bypass_payload_count:
+                        payload_preview = payload[:50] + '...' if len(payload) > 50 else payload
+                        print(f"{Fore.MAGENTA}    ├─ [Bypass {idx}/{bypass_payload_count}] {Fore.YELLOW}{payload_preview}{Style.RESET_ALL}")
+                elif is_waf_bypass and idx <= bypass_payload_count:
+                    # Even without verbose, show a progress indicator for bypass payloads
+                    if idx == 1 or idx % 25 == 0 or idx == bypass_payload_count:
+                        print(f"{Fore.MAGENTA}    ├─ Testing WAF bypass payloads... [{idx}/{bypass_payload_count}]{Style.RESET_ALL}", end='\r')
                 
                 if method == 'GET':
                     # Build URL with payload
@@ -3212,8 +3255,30 @@ class XSSScanner:
                     encoded_url = f"{url}?{param}={encoded_payload}"
                     response = self.session.post(url, data=data, timeout=self.timeout, verify=False)
                 
-                # Check if payload is reflected
-                if self._check_reflection(response.text, payload):
+                # Check if payload is reflected WITH TIMEOUT
+                # Use threading to enforce a 5-second timeout on reflection checking
+                is_reflected = False
+                reflection_result = [False]  # Use list to share result between threads
+                
+                def check_with_timeout():
+                    try:
+                        reflection_result[0] = self._check_reflection(response.text, payload)
+                    except Exception:
+                        reflection_result[0] = False
+                
+                check_thread = threading.Thread(target=check_with_timeout, daemon=True)
+                check_thread.start()
+                check_thread.join(timeout=5.0)  # 5-second timeout for reflection check
+                
+                if check_thread.is_alive():
+                    # Reflection check timed out - skip this payload
+                    if self.verbose:
+                        print(f"{Fore.YELLOW}    [!] Skipping payload {idx} (reflection check timeout){Style.RESET_ALL}")
+                    continue
+                
+                is_reflected = reflection_result[0]
+                
+                if is_reflected:
                     vuln = {
                         'url': url,
                         'param': param,
@@ -3589,143 +3654,235 @@ class XSSScanner:
         
         return dom_sinks
     
+    # Patterns that indicate a potential XSS if reflected
+    DANGEROUS_PATTERNS = [
+        '<script', 'javascript:', 'onerror=', 'onload=', 'onclick=', 
+        'onmouseover=', 'onfocus=', 'ontoggle=', 'data:', 'alert', 
+        'confirm', 'prompt', 'eval(', 'document.cookie'
+    ]
+
     def _check_reflection(self, response_text, payload):
         """Check if payload is reflected in response WITHOUT being encoded/escaped"""
         import html
+        from urllib.parse import unquote
         
         # The payload must appear EXACTLY as sent (unencoded) for XSS to work
         # If it's HTML encoded, it won't execute
         
-        # First, check for the exact unmodified payload in the response
-        if payload not in response_text:
-            return False
+        # For WAF bypass payloads, we need to check multiple variations:
+        # 1. The exact payload
+        # 2. URL-decoded version (server may decode)
+        # 3. Double URL-decoded version (for double encoding bypasses)
+        # 4. Core XSS patterns that indicate successful injection
         
-        # Payload is reflected exactly - but we need to verify it's actually our payload
-        # and not just the page's normal HTML that happens to contain similar patterns
+        payloads_to_check = [payload]
         
-        # These patterns indicate actual XSS (unencoded dangerous characters)
-        dangerous_patterns = [
-            '<script',      # Script tag opening
-            '</script',     # Script tag closing  
-            '<svg',         # SVG tag
-            '<img',         # Image tag with no space (for <img/src or <img src)
-            '<iframe',      # Iframe tag
-            '<body',        # Body tag
-            '<input',       # Input tag
-            '<button',      # Button tag
-            '<form',        # Form tag
-            '<object',      # Object tag
-            '<embed',       # Embed tag
-            '<video',       # Video tag
-            '<audio',       # Audio tag
-            '<math',        # Math tag
-            '<details',     # Details tag
-            '<marquee',     # Marquee tag
-            '<select',      # Select tag
-            '<textarea',    # Textarea tag
-            '<keygen',      # Keygen tag
-            '<isindex',     # Isindex tag
-            '<style',       # Style tag
-            '<link',        # Link tag
-            '<base',        # Base tag
-            '<meta',        # Meta tag (for http-equiv)
-            '<xmp',         # XMP tag
-            '<listing',     # Listing tag
-            '<title',       # Title tag
-            '<noscript',    # Noscript tag
-            '<frameset',    # Frameset tag
-            'onerror=',     # Event handler
-            'onload=',      # Event handler
-            'onclick=',     # Event handler
-            'onmouseover=', # Event handler
-            'onfocus=',     # Event handler
-            'onblur=',      # Event handler
-            'ontoggle=',    # Event handler
-            'onbegin=',     # Event handler (SVG)
-            'onpageshow=',  # Event handler
-            'onhashchange=',# Event handler
-            'onscroll=',    # Event handler
-            'onstart=',     # Event handler (marquee)
-            'onfinish=',    # Event handler (marquee)
-            'onanimationstart=', # Event handler
-            'onanimationend=',   # Event handler
-            'javascript:',  # JavaScript protocol
-            'vbscript:',    # VBScript protocol
-            'data:text/html', # Data URI with HTML
-        ]
+        # Add URL-decoded versions for encoded bypass payloads
+        try:
+            decoded_once = unquote(payload)
+            if decoded_once != payload:
+                payloads_to_check.append(decoded_once)
+            decoded_twice = unquote(decoded_once)
+            if decoded_twice != decoded_once:
+                payloads_to_check.append(decoded_twice)
+        except:
+            pass
         
-        payload_lower = payload.lower()
-        
-        # Check if the payload itself contains any dangerous patterns
-        payload_has_dangerous_pattern = False
-        for pattern in dangerous_patterns:
-            if pattern in payload_lower:
-                payload_has_dangerous_pattern = True
-                break
-        
-        if not payload_has_dangerous_pattern:
-            # Payload doesn't have dangerous patterns - not a valid XSS
-            # (e.g., template injection payloads like {{7*7}} need different handling)
-            # Check for template injection patterns
-            template_patterns = ['{{', '${', '#{', '<%']
-            for tp in template_patterns:
-                if tp in payload and tp in response_text:
-                    # Could be template injection, but for XSS scanner we focus on HTML injection
-                    pass
-            return False
-        
-        # Now verify the EXACT payload appears in the response (not encoded)
-        # Find all occurrences of the payload in the response
-        response_lower = response_text.lower()
-        
-        # Look for the payload in the response
-        search_start = 0
-        while True:
-            idx = response_text.find(payload, search_start)
-            if idx == -1:
-                break
+        # Check for any version of the payload in the response
+        payload_found = False
+        # Iterate through ALL variants to find one that is both reflected AND dangerous
+        for variant in payloads_to_check:
+            matched_payload = variant
             
-            # Found the exact payload - now verify context
-            # Check if it's inside HTML comments
-            # Get broader context to check for comments
-            context_start = max(0, idx - 100)
-            context_end = min(len(response_text), idx + len(payload) + 100)
-            context = response_text[context_start:context_end]
+            # Skip empty payloads to prevent issues
+            if not matched_payload:
+                continue
             
-            # Check if payload position is inside a comment
-            payload_rel_pos = idx - context_start
+            # Check if this variant is in the response
+            if matched_payload not in response_text:
+                continue
+                
+            # Found a reflection! Now verify it's dangerous
             
-            # Find all comment boundaries in context
-            in_comment = False
-            i = 0
-            while i < len(context):
-                if context[i:i+4] == '<!--':
-                    comment_end = context.find('-->', i + 4)
-                    if comment_end != -1:
-                        if i < payload_rel_pos < comment_end + 3:
-                            in_comment = True
-                            break
-                        i = comment_end + 3
+            # Check if the payload variant itself contains dangerous patterns
+            payload_lower = matched_payload.lower()
+            payload_has_dangerous_pattern = False
+            for pattern in self.DANGEROUS_PATTERNS:
+                if pattern in payload_lower:
+                    payload_has_dangerous_pattern = True
+                    break
+            
+            if not payload_has_dangerous_pattern:
+                # This variant is safe (e.g., fully encoded), try the next one
+                continue
+            
+            # This variant IS dangerous (e.g., decoded script tag)
+            # Now verify its context in the response
+            
+            # Find all occurrences of this specific variant (limit to first 10 to prevent hangs)
+            search_start = 0
+            max_occurrences = 10  # Safety limit
+            occurrence_count = 0
+            
+            while occurrence_count < max_occurrences:
+                idx = response_text.find(matched_payload, search_start)
+                if idx == -1:
+                    break
+                
+                occurrence_count += 1
+                
+                # Found the dangerous variant - check context (comments, etc.)
+                context_start = max(0, idx - 100)
+                context_end = min(len(response_text), idx + len(matched_payload) + 100)
+                context = response_text[context_start:context_end]
+                
+                payload_rel_pos = idx - context_start
+                
+                # Check for comments (with safety limit on iterations)
+                in_comment = False
+                i = 0
+                max_context_iterations = len(context) + 1  # Safety limit
+                iterations = 0
+                while i < len(context) and iterations < max_context_iterations:
+                    iterations += 1
+                    if context[i:i+4] == '<!--':
+                        comment_end = context.find('-->', i + 4)
+                        if comment_end != -1:
+                            if i < payload_rel_pos < comment_end + 3:
+                                in_comment = True
+                                break
+                            i = comment_end + 3
+                        else:
+                            # Unclosed comment
+                            if i < payload_rel_pos:
+                                in_comment = True
+                                break
+                            i += 4
                     else:
-                        # Unclosed comment that starts before payload
-                        if i < payload_rel_pos:
-                            in_comment = True
-                            break
-                        i += 4
-                else:
-                    i += 1
-            
-            if not in_comment:
-                # Not in a comment - this is a valid XSS reflection
-                return True
-            
-            search_start = idx + 1
+                        i += 1
+                
+                if not in_comment:
+                    # Valid dangerous reflection found!
+                    # ADDITIONAL SAFETY CHECK: Check for safe contexts (textarea, title, etc.)
+                    if self._is_safe_context(response_text, idx, matched_payload):
+                        # It's in a safe context (like <title>...</title>), treating as not vulnerable
+                        continue
+                        
+                    return True
+                
+                search_start = idx + len(matched_payload)  # Skip past current match
         
         return False
     
-    def _is_in_safe_context(self, html, indicator):
-        """Check if the indicator appears in a safe context (like text node)"""
-        # This is now handled in _check_reflection
+    def _is_safe_context(self, html, match_index, payload):
+        """Check if the payload is in a safe context (e.g. textarea, title, safe attribute)"""
+        # Look backwards from match_index to find the opening tag
+        # Limit search window for performance
+        search_window = 500
+        start_search = max(0, match_index - search_window)
+        preceding_text = html[start_search:match_index].lower()
+        
+        # 1. Check for Safe Tags where scripts don't execute
+        safe_tags = ['<textarea', '<title', '<style', '<noscript', '<noembed', '<template', '<pre', '<code']
+        
+        # Find the last opening tag
+        last_tag_idx = -1
+        last_tag_name = ""
+        
+        for tag in safe_tags:
+            tag_idx = preceding_text.rfind(tag)
+            if tag_idx > last_tag_idx:
+                last_tag_idx = tag_idx
+                last_tag_name = tag
+        
+        # If we found a safe tag opening
+        if last_tag_idx != -1:
+            # Check if it was closed before the payload
+            # Extract the tag name properly (e.g. <textarea)
+            tag_pure_name = last_tag_name[1:] # remove <
+            closing_tag = f"</{tag_pure_name}>"
+            
+            # Check if there is a closing tag BETWEEN the opening safe tag and the payload
+            # Note: last_tag_idx is relative to preceding_text start
+            
+            # Text between safe tag open and payload
+            interim_text = preceding_text[last_tag_idx:]
+            
+            if closing_tag not in interim_text:
+                # We are INSIDE a safe tag!
+                # UNLESS the payload itself closes it (breakout)
+                # If payload contains </textarea> or </title> etc, it might be a breakout
+                if f"</{tag_pure_name}>" in payload.lower():
+                    return False # Breakout attempts are DANGEROUS, so NOT safe context
+                
+                return True # Trapped inside safe tag without breakout = Safe
+        
+        # 2. Check for Attribute Context (Safe vs Dangerous)
+        # If we are inside an HTML attribute
+        # Simplified check: look for <tag ... attribute="[PAYLOAD IS HERE]"
+        
+        # Find start of current tag (look for last <)
+        last_bracket = preceding_text.rfind('<')
+        last_close_bracket = preceding_text.rfind('>')
+        
+        if last_bracket > last_close_bracket:
+            # We are likely inside a tag definition
+            tag_def = preceding_text[last_bracket:]
+            
+            # Check if we are inside an attribute value
+            # Count quotes to see if we are inside one
+            # This is heuristic and imperfect but filter obvious false positives
+            
+            if '="' in tag_def or "='" in tag_def:
+                # We are in an attribute. Check if we broke out.
+                # If payload starts with " or ' or > it attempts to break out.
+                
+                # If payload does NOT assume breakout (e.g. just <script...), it is SAFE in attribute (treated as string)
+                # UNLESS it is a special attribute like href="javascript:..." or on*="..."
+                
+                # If the payload is just a standard tag injection like <script>...
+                # And it didn't break out of the quote...
+                
+                # Check what quote was used
+                last_double = tag_def.rfind('"')
+                last_single = tag_def.rfind("'")
+                
+                quote_char = None
+                if last_double > last_single and last_double != -1:
+                    quote_char = '"'
+                elif last_single > last_double and last_single != -1:
+                    quote_char = "'"
+                
+                if quote_char:
+                    # We are likely in a quoted attribute
+                    # Does payload break it?
+                    if quote_char not in payload and '>' not in payload:
+                        # Payload does not break out of attribute, and is not breaking the tag
+                        # Check if attribute name is dangerous (on*, href, srcdoc)
+                        # Find attribute name before the quote
+                        attr_part = tag_def[:tag_def.rfind(quote_char)]
+                        # e.g. <a href=
+                        
+                        is_dangerous_attr = False
+                        for dang in ['on', 'href', 'src', 'action', 'data']:
+                            if attr_part.strip().endswith(dang + '='):
+                                is_dangerous_attr = True
+                        
+                        if not is_dangerous_attr:
+                            # Inside safe attribute (e.g. value="<script>...") and didn't break out
+                            return True
+        
+        # 3. Check for JavaScript String Context
+        # <script>var x = "[PAYLOAD]";</script>
+        # If we correspond to [PAYLOAD], checks if we are in string
+        
+        if '<script' in preceding_text and '</script>' not in preceding_text[preceding_text.rfind('<script'):]:
+             # Inside JS
+             # Check if inside string
+             # Simple heuristic: count quotes in the closest JS context
+             # This is hard to do reliably with regex/simple parsing, omitting for now to avoid false negatives.
+             pass
+
         return False
     
     def print_results(self):
@@ -3737,46 +3894,45 @@ class XSSScanner:
         # Count DOM sinks if available
         dom_sinks_count = len(getattr(self, 'dom_sinks_found', []))
         
-        print(f"\n{Fore.CYAN}╔{'═'*68}╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║{' '*22}📊 SCAN RESULTS SUMMARY{' '*22}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╠{'═'*68}╣{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Target:              {Fore.CYAN}{self.target[:45]:<45}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Pages Crawled:       {Fore.YELLOW}{len(self.visited):<46}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Endpoints Found:     {Fore.YELLOW}{len(self.found_params):<46}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Parameters Found:    {Fore.YELLOW}{total_params:<46}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Total Tests Run:     {Fore.YELLOW}{total_tests:<46}║{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|{' '*22}📊 SCAN RESULTS SUMMARY{' '*22}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Target:              {Fore.CYAN}{self.target[:45]:<45}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Pages Crawled:       {Fore.YELLOW}{len(self.visited):<46}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Endpoints Found:     {Fore.YELLOW}{len(self.found_params):<46}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Parameters Found:    {Fore.YELLOW}{total_params:<46}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Total Tests Run:     {Fore.YELLOW}{total_tests:<46}|{Style.RESET_ALL}")
         
         # Show DOM sinks if found
         if dom_sinks_count > 0:
-            print(f"{Fore.CYAN}║ {Fore.WHITE}DOM XSS Sinks:       {Fore.RED}{dom_sinks_count:<46}║{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}| {Fore.WHITE}DOM XSS Sinks:       {Fore.RED}{dom_sinks_count:<46}|{Style.RESET_ALL}")
         
         vulns_color = Fore.RED if self.vulnerabilities else Fore.GREEN
         vuln_status = f"{len(self.vulnerabilities)} {'⚠️  VULNERABLE!' if self.vulnerabilities else '✓ SECURE'}"
-        print(f"{Fore.CYAN}║ {Fore.WHITE}Vulnerabilities:     {vulns_color}{vuln_status:<46}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚{'═'*68}╝{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}Vulnerabilities:     {vulns_color}{vuln_status:<46}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
         
         # Print DOM XSS findings
         if dom_sinks_count > 0:
-            print(f"\n{Fore.YELLOW}╔{'═'*68}╗{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}║{' '*16}⚠️  POTENTIAL DOM XSS DETECTED ⚠️{' '*16}║{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}╚{'═'*68}╝{Style.RESET_ALL}\n")
+            print(f"\n{Fore.YELLOW}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}|{' '*16}⚠️  POTENTIAL DOM XSS DETECTED ⚠️{' '*16}|{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}+{'-'*68}+{Style.RESET_ALL}\n")
             
             for i, sink in enumerate(self.dom_sinks_found[:5], 1):
                 severity_color = Fore.RED if sink['severity'] == 'critical' else (Fore.YELLOW if sink['severity'] == 'high' else Fore.CYAN)
                 print(f"{Fore.YELLOW}[{i}] {severity_color}{sink['sink']} ({sink['severity']}){Style.RESET_ALL}")
                 print(f"    {Fore.WHITE}Source: {Fore.CYAN}{sink['source']}{Style.RESET_ALL}")
                 if 'url' in sink:
-                    short_url = sink['url'][:50] + '...' if len(sink['url']) > 50 else sink['url']
-                    print(f"    {Fore.WHITE}URL: {Fore.BLUE}{short_url}{Style.RESET_ALL}")
+                    print(f"    {Fore.WHITE}URL: {Fore.BLUE}{sink['url']}{Style.RESET_ALL}")
                 print()
             
             if dom_sinks_count > 5:
                 print(f"{Fore.BLUE}... and {dom_sinks_count - 5} more potential DOM XSS sinks{Style.RESET_ALL}\n")
         
         if self.vulnerabilities:
-            print(f"\n{Fore.RED}╔{'═'*68}╗{Style.RESET_ALL}")
-            print(f"{Fore.RED}║{' '*18}🚨 VULNERABILITIES DETECTED 🚨{' '*18}║{Style.RESET_ALL}")
-            print(f"{Fore.RED}╚{'═'*68}╝{Style.RESET_ALL}\n")
+            print(f"\n{Fore.RED}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.RED}|{' '*18}🚨 VULNERABILITIES DETECTED 🚨{' '*18}|{Style.RESET_ALL}")
+            print(f"{Fore.RED}+{'-'*68}+{Style.RESET_ALL}\n")
             
             # Group by URL and param for cleaner output
             vuln_by_url = {}
@@ -3793,9 +3949,8 @@ class XSSScanner:
                 vuln_by_url[key]['payloads'].append(vuln['payload'])
             
             for i, (key, v) in enumerate(vuln_by_url.items(), 1):
-                short_url = v['url'][:55] + '...' if len(v['url']) > 55 else v['url']
                 print(f"{Fore.RED}[{i}] {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
-                print(f"    {Fore.WHITE}URL:       {Fore.CYAN}{short_url}{Style.RESET_ALL}")
+                print(f"    {Fore.WHITE}URL:       {Fore.CYAN}{v['url']}{Style.RESET_ALL}")
                 print(f"    {Fore.WHITE}Parameter: {Fore.GREEN}{v['param']}{Style.RESET_ALL}")
                 print(f"    {Fore.WHITE}Method:    {Fore.YELLOW}{v['method']}{Style.RESET_ALL}")
                 print(f"    {Fore.WHITE}Payloads:  {Fore.MAGENTA}{len(v['payloads'])} working{Style.RESET_ALL}")
@@ -3808,9 +3963,9 @@ class XSSScanner:
                 print()
             
             # Print exploit URLs section
-            print(f"{Fore.MAGENTA}╔{'═'*68}╗{Style.RESET_ALL}")
-            print(f"{Fore.MAGENTA}║{' '*15}🔗 EXPLOIT URLs (Copy & Paste){' '*21}║{Style.RESET_ALL}")
-            print(f"{Fore.MAGENTA}╚{'═'*68}╝{Style.RESET_ALL}\n")
+            print(f"{Fore.MAGENTA}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}|{' '*15}🔗 EXPLOIT URLs (Copy & Paste){' '*21}|{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}+{'-'*68}+{Style.RESET_ALL}\n")
             
             # Show unique exploit URLs
             seen_urls = set()
@@ -3828,15 +3983,15 @@ class XSSScanner:
                         break
             
         else:
-            print(f"\n{Fore.GREEN}╔{'═'*68}╗{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}║{' '*22}✅ NO VULNERABILITIES{' '*24}║{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}╚{'═'*68}╝{Style.RESET_ALL}")
+            print(f"\n{Fore.GREEN}+{'-'*68}+{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}|{' '*22}✅ NO VULNERABILITIES{' '*24}|{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}+{'-'*68}+{Style.RESET_ALL}")
             print(f"\n{Fore.YELLOW}💡 Note: No XSS vulnerabilities detected with automatic testing.{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}   Manual testing and DOM-based XSS checks are recommended.{Style.RESET_ALL}")
         
-        print(f"\n{Fore.CYAN}╔{'═'*68}╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║{' '*24}✨ SCAN COMPLETE ✨{' '*25}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚{'═'*68}╝{Style.RESET_ALL}\n")
+        print(f"\n{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|{' '*24}✨ SCAN COMPLETE ✨{' '*25}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}\n")
     
     def show_payloads(self):
         """Display all available XSS payloads"""
@@ -3946,26 +4101,26 @@ class XSSScanner:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"""
-{Fore.CYAN}{Style.BRIGHT}╔══════════════════════════════════════════════════════════════════╗
-║{Fore.GREEN}  ≋{Fore.YELLOW}★                                                          {Fore.GREEN}★≋  {Fore.CYAN}║
-║   {Fore.RED}██╗  ██╗███████╗███████╗    {Fore.GREEN}███████╗ ██████╗ █████╗ ███╗   ██╗{Fore.GREEN}➤{Fore.CYAN}║
-║   {Fore.RED}╚██╗██╔╝██╔════╝██╔════╝    {Fore.GREEN}██╔════╝██╔════╝██╔══██╗████╗  ██║{Fore.CYAN} ║
-║    {Fore.RED}╚███╔╝ ███████╗███████╗    {Fore.GREEN}███████╗██║     ███████║██╔██╗ ██║{Fore.GREEN}➤{Fore.CYAN}║
-║    {Fore.RED}██╔██╗ ╚════██║╚════██║    {Fore.GREEN}╚════██║██║     ██╔══██║██║╚██╗██║{Fore.CYAN} ║
-║   {Fore.RED}██╔╝ ██╗███████║███████║    {Fore.GREEN}███████║╚██████╗██║  ██║██║ ╚████║{Fore.GREEN}➤{Fore.CYAN}║
-║   {Fore.RED}╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.GREEN}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝{Fore.CYAN} ║
-║                                                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║   {Fore.YELLOW}⚡ {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux{Fore.CYAN}                ║
-║   {Fore.YELLOW}⚡ {Fore.WHITE}Automatic Parameter Discovery & Payload Testing{Fore.CYAN}             ║
-║   {Fore.YELLOW}⚡ {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities{Fore.CYAN}            ║
-║   {Fore.YELLOW}⚡ {Fore.WHITE}Enhanced Auto-Crawl for PHP MVC Endpoints{Fore.CYAN}                   ║
-╠══════════════════════════════════════════════════════════════════╣
-║      {Fore.YELLOW}🔥 {Fore.WHITE}Crafted by: {Fore.MAGENTA}S{Fore.CYAN}u{Fore.GREEN}b{Fore.YELLOW}h{Fore.RED}a{Fore.MAGENTA}j{Fore.CYAN}i{Fore.GREEN}t {Fore.WHITE}⚔️  {Fore.MAGENTA}Cyber Security Enthusiast{Fore.CYAN}       ║
-║           {Fore.YELLOW}⚠️  {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} ⚠️{Fore.CYAN}            ║
-║{Fore.GREEN}  ≋{Fore.YELLOW}★                                                          {Fore.GREEN}★≋  {Fore.CYAN}║
-╚══════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        description=rf"""
+{Fore.CYAN}{Style.BRIGHT}╔{'═'*69}╗
+║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
+║{Fore.GREEN}   ██╗  ██╗███████╗███████╗    {Fore.WHITE}███████╗ ██████╗ █████╗ ███╗   ██╗    {Fore.CYAN}║
+║{Fore.GREEN}   ╚██╗██╔╝██╔════╝██╔════╝    {Fore.WHITE}██╔════╝██╔════╝██╔══██╗████╗  ██║    {Fore.CYAN}║
+║{Fore.GREEN}    ╚███╔╝ ███████╗███████╗    {Fore.WHITE}███████╗██║     ███████║██╔██╗ ██║    {Fore.CYAN}║
+║{Fore.GREEN}    ██╔██╗ ╚════██║╚════██║    {Fore.WHITE}╚════██║██║     ██╔══██║██║╚██╗██║    {Fore.CYAN}║
+║{Fore.GREEN}   ██╔╝ ██╗███████║███████║    {Fore.WHITE}███████║╚██████╗██║  ██║██║ ╚████║    {Fore.CYAN}║
+║{Fore.GREEN}   ╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.WHITE}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝    {Fore.CYAN}║
+║                                                                     ║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux                  {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Automatic Parameter Discovery & Payload Testing               {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities              {Fore.CYAN}║
+║{Fore.YELLOW}   [+] {Fore.WHITE}Enhanced Auto-Crawl for PHP MVC Endpoints                     {Fore.CYAN}║
+║                                                                     ║
+║      {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}> {Fore.WHITE}Code by {Fore.WHITE}Subhajit {Fore.WHITE}- {Fore.GREEN}Security Research {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}>{Fore.CYAN}                   ║
+║                                                                     ║
+║           {Fore.YELLOW}[!] {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} [!]{Fore.CYAN}              ║
+║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
+╚{'═'*69}╝{Style.RESET_ALL}
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -4163,9 +4318,9 @@ Examples:
             '⚠️ Generic': ['generic_waf'],
         }
         
-        print(f"\n{Fore.CYAN}╔{'═'*68}╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║{Fore.WHITE}             🛡️  DETECTABLE WAF SIGNATURES (160+)               {Fore.CYAN}║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚{'═'*68}╝{Style.RESET_ALL}\n")
+        print(f"\n{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}|{Fore.WHITE}             🛡️  DETECTABLE WAF SIGNATURES (160+)               {Fore.CYAN}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}\n")
         
         total_wafs = 0
         for category, wafs in waf_categories.items():
@@ -4178,7 +4333,7 @@ Examples:
                     display_name = waf.replace('_', ' ').title()
                     print(f"  {Fore.GREEN}✓{Fore.WHITE} {display_name}{Style.RESET_ALL}")
         
-        print(f"\n{Fore.CYAN}{'═'*70}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}+{'-'*70}+{Style.RESET_ALL}")
         print(f"{Fore.WHITE}Total detectable WAFs: {Fore.GREEN}{total_wafs}{Style.RESET_ALL}")
         print(f"{Fore.WHITE}Total bypass payloads: {Fore.GREEN}{len(scanner.WAF_BYPASS_PAYLOADS)}{Style.RESET_ALL}\n")
         sys.exit(0)
