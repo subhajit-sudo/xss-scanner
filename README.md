@@ -174,7 +174,11 @@ python xss_scanner.py --show-wafs
 xss-scanner/
 ├── 📄 xss_scanner.py        # Main scanner script
 ├── 📄 requirements.txt      # Python dependencies
+<<<<<<< HEAD
 ├── ├── 📄 sample_payloads.txt   # Example custom payloads
+=======
+├── 📄 sample_payloads.txt   # Example custom payloads
+>>>>>>> 98f3c20 (Enhance Wayback URL discovery, fix WAF detection UnboundLocalError, and improve context detection to fix false positives)
 └── 📄 README.md             # This file
 ```
 
