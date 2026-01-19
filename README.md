@@ -146,19 +146,25 @@ python xss_scanner.py --show-wafs
 
 ---
 
-### Command Line Options
+## ⚙️ Command Line Options
 
 | Option | Description |
 |--------|-------------|
-| `-h, --help` | Show help message and exit |
+| `domain` | Target domain to scan (e.g., example.com) |
 | `-d, --depth` | Maximum crawl depth (default: 3) |
-| `-t, --timeout` | Request timeout in seconds |
-| `-v, --verbose` | Enable verbose output (detailed logging) |
-| `--waf-bypass` | **Enable WAF bypass mode** (highly recommended for protected sites) |
-| `--auto-crawl` | Enable enhanced PHP MVC endpoint discovery (default: on) |
-| `--show-wafs` | List all 160+ detectable WAF signatures |
-| `-p, --payloads` | Load custom XSS payloads from a file |
-| `--show-payloads` | Display all built-in payloads |
+| `-t, --timeout` | Request timeout in seconds (default: 10) |
+| `-v, --verbose` | Enable verbose output |
+| `-p, --payloads FILE` | Path to custom payload list file |
+| `--all-payloads` | Test ALL payloads per parameter |
+| `--waf-bypass` | Enable WAF bypass mode with advanced evasion payloads |
+| `--show-payloads` | Show all available XSS payloads and exit |
+| `--show-waf-payloads` | Show all WAF bypass payloads and exit |
+| `--show-wafs` | Show all detectable WAFs (160+) and exit |
+| `--deep-scan` | Enable comprehensive XSS testing |
+| `--auto-crawl` | Enhanced auto-crawl for PHP MVC endpoints |
+| `--no-brute-params` | Disable parameter brute-forcing |
+| `--no-force-test` | Disable force testing of common XSS params |
+| `--no-auto-crawl` | Disable PHP endpoint auto-crawl discovery |
 
 ---
 
@@ -168,7 +174,7 @@ python xss_scanner.py --show-wafs
 xss-scanner/
 ├── 📄 xss_scanner.py        # Main scanner script
 ├── 📄 requirements.txt      # Python dependencies
-├── 📄 sample_payloads.txt   # Example custom payloads
+├── ├── 📄 sample_payloads.txt   # Example custom payloads
 └── 📄 README.md             # This file
 ```
 

