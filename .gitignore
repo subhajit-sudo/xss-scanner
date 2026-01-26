@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.vscode/
+.idea/
+*.log
+.env
+venv/
+env/
+.git/
+# Not ignoring subdomains.txt as it seems to be part of the user's project requirements based on previous context.
